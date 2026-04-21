@@ -19,6 +19,7 @@ export const orderStatusEnum = pgEnum('order_status', [
 // --- 1. NGƯỜI DÙNG & ĐỊA CHỈ (Centralized Address System) ---
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
+  firebaseUid: varchar('firebase_uid', { length: 128 }).unique(),
   phone: varchar('phone', { length: 15 }).unique().notNull(), // Dùng cho Firebase OTP
   fullName: text('full_name').notNull(),
   avatar: text('avatar'),

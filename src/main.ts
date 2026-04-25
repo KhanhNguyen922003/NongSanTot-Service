@@ -12,6 +12,7 @@ async function bootstrap() {
       transform: true,
     }),
   );
+  app.enableCors();
   await app.listen(process.env.PORT ?? 3000);
   console.log('Link to Server: http://localhost:' + (process.env.PORT ?? 3000));
 }

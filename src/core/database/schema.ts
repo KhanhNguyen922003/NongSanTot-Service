@@ -47,7 +47,11 @@ export const addresses = pgTable('addresses', {
 // --- 2. CỬA HÀNG (Shop Module) ---
 export const shops = pgTable('shops', {
   id: serial('id').primaryKey(),
-  ownerId: integer('owner_id').references(() => users.id).notNull(),
+  /** Mỗi user tối đa 1 shop (bán cá nhân) */
+  ownerId: integer('owner_id')
+    .references(() => users.id)
+    .notNull()
+    .unique(),
   name: text('name').notNull(),
   description: text('description'),
   logo: text('logo'),
@@ -61,6 +65,7 @@ export const shops = pgTable('shops', {
   rating: doublePrecision('rating').default(0),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at'),
 });
 
 // --- 3. SẢN PHẨM & NHẬT KÝ GIAI ĐOẠN (Growth Diary) ---

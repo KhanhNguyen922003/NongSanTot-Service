@@ -1,13 +1,13 @@
 CREATE TYPE "public"."order_status" AS ENUM('pending', 'confirmed', 'processing', 'shipping', 'delivered', 'cancelled');--> statement-breakpoint
+CREATE TYPE "public"."product_status" AS ENUM('draft', 'pending_review', 'active', 'rejected', 'archived');--> statement-breakpoint
 CREATE TYPE "public"."user_role" AS ENUM('buyer', 'seller', 'admin');--> statement-breakpoint
 CREATE TABLE "addresses" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"user_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
 	"label" text,
 	"receiver_name" text NOT NULL,
 	"receiver_phone" varchar(15) NOT NULL,
 	"province" text NOT NULL,
-	"district" text NOT NULL,
 	"ward" text NOT NULL,
 	"detail" text NOT NULL,
 	"is_default" boolean DEFAULT false,
@@ -15,20 +15,20 @@ CREATE TABLE "addresses" (
 );
 --> statement-breakpoint
 CREATE TABLE "cart_items" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"cart_id" integer NOT NULL,
-	"product_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"cart_id" uuid NOT NULL,
+	"product_id" uuid NOT NULL,
 	"quantity" double precision NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "carts" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"user_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
 	CONSTRAINT "carts_user_id_unique" UNIQUE("user_id")
 );
 --> statement-breakpoint
 CREATE TABLE "categories" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"name" text NOT NULL,
 	"slug" varchar NOT NULL,
 	"icon" text,
@@ -36,25 +36,25 @@ CREATE TABLE "categories" (
 );
 --> statement-breakpoint
 CREATE TABLE "conversations" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"user_id" integer NOT NULL,
-	"shop_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
+	"shop_id" uuid NOT NULL,
 	"last_message" text,
 	"updated_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
 CREATE TABLE "messages" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"conversation_id" integer NOT NULL,
-	"sender_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"conversation_id" uuid NOT NULL,
+	"sender_id" uuid NOT NULL,
 	"content" text NOT NULL,
 	"is_read" boolean DEFAULT false,
 	"created_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
 CREATE TABLE "notifications" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"user_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"user_id" uuid NOT NULL,
 	"title" text NOT NULL,
 	"content" text NOT NULL,
 	"type" varchar(50),
@@ -63,19 +63,19 @@ CREATE TABLE "notifications" (
 );
 --> statement-breakpoint
 CREATE TABLE "order_items" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"order_id" integer NOT NULL,
-	"product_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"order_id" uuid NOT NULL,
+	"product_id" uuid NOT NULL,
 	"quantity" double precision NOT NULL,
 	"price_at_purchase" double precision NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "orders" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"buyer_id" integer NOT NULL,
-	"shop_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"buyer_id" uuid NOT NULL,
+	"shop_id" uuid NOT NULL,
 	"shipping_address_snapshot" text NOT NULL,
-	"actual_pick_address_id" integer,
+	"actual_pick_address_id" uuid,
 	"total_price" double precision NOT NULL,
 	"shipping_fee" double precision NOT NULL,
 	"final_price" double precision NOT NULL,
@@ -86,37 +86,50 @@ CREATE TABLE "orders" (
 );
 --> statement-breakpoint
 CREATE TABLE "product_growth_diary" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"product_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"product_id" uuid NOT NULL,
+	"stage_order" integer DEFAULT 0 NOT NULL,
 	"stage_name" text NOT NULL,
 	"description" text,
 	"images" text[],
+	"videos" text[],
+	"documents" text[],
 	"log_date" timestamp DEFAULT now()
 );
 --> statement-breakpoint
 CREATE TABLE "products" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"shop_id" integer NOT NULL,
-	"category_id" integer,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"shop_id" uuid NOT NULL,
+	"category_id" uuid,
 	"name" text NOT NULL,
 	"description" text,
 	"origin" text NOT NULL,
 	"price" double precision NOT NULL,
 	"stock" double precision NOT NULL,
 	"unit" varchar(20) DEFAULT 'kg',
+	"cover_image" text,
 	"images" text[],
+	"videos" text[],
 	"shipping_methods" text[],
 	"average_rating" double precision DEFAULT 0,
 	"review_count" integer DEFAULT 0,
+	"status" "product_status" DEFAULT 'draft' NOT NULL,
+	"rejection_reason" text,
+	"moderation_score" double precision,
+	"moderation_result" jsonb,
+	"moderated_at" timestamp,
+	"trust_score" double precision DEFAULT 0,
+	"verified_badge" boolean DEFAULT false,
 	"is_available" boolean DEFAULT true,
-	"created_at" timestamp DEFAULT now()
+	"created_at" timestamp DEFAULT now(),
+	"updated_at" timestamp
 );
 --> statement-breakpoint
 CREATE TABLE "reviews" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"product_id" integer NOT NULL,
-	"buyer_id" integer NOT NULL,
-	"order_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"product_id" uuid NOT NULL,
+	"buyer_id" uuid NOT NULL,
+	"order_id" uuid NOT NULL,
 	"rating" integer NOT NULL,
 	"comment" text,
 	"images" text[],
@@ -124,25 +137,29 @@ CREATE TABLE "reviews" (
 );
 --> statement-breakpoint
 CREATE TABLE "shops" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"owner_id" integer NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"owner_id" uuid NOT NULL,
 	"name" text NOT NULL,
 	"description" text,
 	"logo" text,
 	"display_address" text,
-	"default_pick_address_id" integer,
+	"default_pick_address_id" uuid,
 	"rating" double precision DEFAULT 0,
 	"is_active" boolean DEFAULT true,
-	"created_at" timestamp DEFAULT now()
+	"created_at" timestamp DEFAULT now(),
+	"updated_at" timestamp,
+	CONSTRAINT "shops_owner_id_unique" UNIQUE("owner_id")
 );
 --> statement-breakpoint
 CREATE TABLE "users" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"firebase_uid" varchar(128),
 	"phone" varchar(15) NOT NULL,
 	"full_name" text NOT NULL,
 	"avatar" text,
 	"role" "user_role" DEFAULT 'buyer',
 	"created_at" timestamp DEFAULT now(),
+	CONSTRAINT "users_firebase_uid_unique" UNIQUE("firebase_uid"),
 	CONSTRAINT "users_phone_unique" UNIQUE("phone")
 );
 --> statement-breakpoint

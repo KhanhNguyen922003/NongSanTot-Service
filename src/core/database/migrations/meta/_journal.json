@@ -5,22 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1774432854375,
-      "tag": "0000_nosy_colonel_america",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1776784305823,
-      "tag": "0002_gray_phil_sheldon",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "7",
-      "when": 1777083945618,
-      "tag": "0004_charming_black_bolt",
+      "when": 1778148737257,
+      "tag": "0000_cultured_stardust",
       "breakpoints": true
     }
   ]

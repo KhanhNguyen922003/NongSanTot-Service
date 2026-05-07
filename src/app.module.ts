@@ -4,9 +4,10 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
 import { ShopsModule } from './modules/shops/shops.module';
+import { AddressesModule } from './modules/addresses/addresses.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), AuthModule, ShopsModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), AuthModule, ShopsModule, AddressesModule],
   controllers: [AppController],
   providers: [AppService],
 })

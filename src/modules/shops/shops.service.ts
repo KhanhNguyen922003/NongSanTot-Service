@@ -42,7 +42,6 @@ export class ShopsService {
         receiverName: payload.receiverName ?? appUser.fullName,
         receiverPhone: payload.receiverPhone ?? appUser.phone,
         province: payload.province ?? '',
-        district: payload.district ?? '',
         ward: payload.ward ?? '',
         detail: payload.detail ?? '',
       })
@@ -73,9 +72,8 @@ export class ShopsService {
   async getMine(currentUser: AuthenticatedUser) {
     const appUser = await this.authService.upsertAppUser(currentUser);
 
-    return db.query.shops.findMany({
+    return db.query.shops.findFirst({
       where: eq(shops.ownerId, appUser.id),
-      orderBy: [desc(shops.createdAt)],
     });
   }
 

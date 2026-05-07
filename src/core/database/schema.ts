@@ -1,13 +1,14 @@
 import { 
   pgTable, 
-  serial, 
+  uuid,
   text, 
   varchar, 
   timestamp, 
   integer, 
   boolean, 
   doublePrecision, 
-  pgEnum 
+  pgEnum,
+  jsonb,
 } from 'drizzle-orm/pg-core';
 
 // --- ENUMS ---
@@ -15,10 +16,13 @@ export const userRoleEnum = pgEnum('user_role', ['buyer', 'seller', 'admin']);
 export const orderStatusEnum = pgEnum('order_status', [
   'pending', 'confirmed', 'processing', 'shipping', 'delivered', 'cancelled'
 ]);
+export const productStatusEnum = pgEnum('product_status', [
+  'draft', 'pending_review', 'active', 'rejected', 'archived'
+]);
 
 // --- 1. NGƯỜI DÙNG & ĐỊA CHỈ (Centralized Address System) ---
 export const users = pgTable('users', {
-  id: serial('id').primaryKey(),
+  id: uuid('id').defaultRandom().primaryKey(),
   firebaseUid: varchar('firebase_uid', { length: 128 }).unique(),
   phone: varchar('phone', { length: 15 }).unique().notNull(), // Dùng cho Firebase OTP
   fullName: text('full_name').notNull(),
@@ -28,15 +32,14 @@ export const users = pgTable('users', {
 });
 
 export const addresses = pgTable('addresses', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id').references(() => users.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
   label: text('label'), // Ví dụ: "Vườn Sầu Riêng", "Nhà riêng"
   receiverName: text('receiver_name').notNull(),
   receiverPhone: varchar('receiver_phone', { length: 15 }).notNull(),
   
   // Rã nhỏ để map payload GHTK cực nhanh
   province: text('province').notNull(),
-  district: text('district').notNull(),
   ward: text('ward').notNull(),
   detail: text('detail').notNull(), // Số nhà, tên đường
   
@@ -46,9 +49,9 @@ export const addresses = pgTable('addresses', {
 
 // --- 2. CỬA HÀNG (Shop Module) ---
 export const shops = pgTable('shops', {
-  id: serial('id').primaryKey(),
+  id: uuid('id').defaultRandom().primaryKey(),
   /** Mỗi user tối đa 1 shop (bán cá nhân) */
-  ownerId: integer('owner_id')
+  ownerId: uuid('owner_id')
     .references(() => users.id)
     .notNull()
     .unique(),
@@ -60,7 +63,7 @@ export const shops = pgTable('shops', {
   displayAddress: text('display_address'), 
   
   // ĐỊA CHỈ MẶC ĐỊNH ĐỂ TÍNH PHÍ SHIP (FK tới bảng addresses)
-  defaultPickAddressId: integer('default_pick_address_id').references(() => addresses.id),
+  defaultPickAddressId: uuid('default_pick_address_id').references(() => addresses.id),
   
   rating: doublePrecision('rating').default(0),
   isActive: boolean('is_active').default(true),
@@ -70,65 +73,80 @@ export const shops = pgTable('shops', {
 
 // --- 3. SẢN PHẨM & NHẬT KÝ GIAI ĐOẠN (Growth Diary) ---
 export const categories = pgTable('categories', {
-  id: serial('id').primaryKey(),
+  id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
   slug: varchar('slug').unique().notNull(), // SEO & Frontend Routing
   icon: text('icon'),
 });
 
 export const products = pgTable('products', {
-  id: serial('id').primaryKey(),
-  shopId: integer('shop_id').references(() => shops.id).notNull(),
-  categoryId: integer('category_id').references(() => categories.id),
+  id: uuid('id').defaultRandom().primaryKey(),
+  shopId: uuid('shop_id').references(() => shops.id).notNull(),
+  categoryId: uuid('category_id').references(() => categories.id),
   name: text('name').notNull(),
   description: text('description'),
   origin: text('origin').notNull(), // Xuất xứ (Ví dụ: Đắk Lắk)
   price: doublePrecision('price').notNull(),
   stock: doublePrecision('stock').notNull(),
   unit: varchar('unit', { length: 20 }).default('kg'),
+  coverImage: text('cover_image'),
   images: text('images').array(),
+  videos: text('videos').array(),
   shippingMethods: text('shipping_methods').array(), // ['GHTK', 'SELF_DELIVERY']
   
   // Thống kê nhanh (Denormalization)
   averageRating: doublePrecision('average_rating').default(0),
   reviewCount: integer('review_count').default(0),
+
+  // Trạng thái đăng bán / kiểm duyệt
+  status: productStatusEnum('status').default('draft').notNull(),
+  rejectionReason: text('rejection_reason'),
+  moderationScore: doublePrecision('moderation_score'),
+  moderationResult: jsonb('moderation_result'),
+  moderatedAt: timestamp('moderated_at'),
+  trustScore: doublePrecision('trust_score').default(0),
+  verifiedBadge: boolean('verified_badge').default(false),
   
   isAvailable: boolean('is_available').default(true),
   createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at'),
 });
 
 export const productGrowthDiary = pgTable('product_growth_diary', {
-  id: serial('id').primaryKey(),
-  productId: integer('product_id').references(() => products.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  productId: uuid('product_id').references(() => products.id).notNull(),
+  stageOrder: integer('stage_order').default(0).notNull(),
   stageName: text('stage_name').notNull(), // Ví dụ: "Nở hoa", "Kết quả"
   description: text('description'),
   images: text('images').array(),
+  videos: text('videos').array(),
+  documents: text('documents').array(),
   logDate: timestamp('log_date').defaultNow(),
 });
 
 // --- 4. GIỎ HÀNG & ĐƠN HÀNG (Cart & Transaction) ---
 export const carts = pgTable('carts', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id').references(() => users.id).unique().notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id).unique().notNull(),
 });
 
 export const cartItems = pgTable('cart_items', {
-  id: serial('id').primaryKey(),
-  cartId: integer('cart_id').references(() => carts.id).notNull(),
-  productId: integer('product_id').references(() => products.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  cartId: uuid('cart_id').references(() => carts.id).notNull(),
+  productId: uuid('product_id').references(() => products.id).notNull(),
   quantity: doublePrecision('quantity').notNull(),
 });
 
 export const orders = pgTable('orders', {
-  id: serial('id').primaryKey(),
-  buyerId: integer('buyer_id').references(() => users.id).notNull(),
-  shopId: integer('shop_id').references(() => shops.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  buyerId: uuid('buyer_id').references(() => users.id).notNull(),
+  shopId: uuid('shop_id').references(() => shops.id).notNull(),
   
   // Snapshot địa chỉ tại thời điểm đặt để tránh User đổi địa chỉ làm sai lệch lịch sử
   shippingAddressSnapshot: text('shipping_address_snapshot').notNull(),
   
   // Địa chỉ lấy hàng thực tế (Shop chọn khi bấm xác nhận)
-  actualPickAddressId: integer('actual_pick_address_id').references(() => addresses.id),
+  actualPickAddressId: uuid('actual_pick_address_id').references(() => addresses.id),
   
   totalPrice: doublePrecision('total_price').notNull(),
   shippingFee: doublePrecision('shipping_fee').notNull(),
@@ -141,19 +159,19 @@ export const orders = pgTable('orders', {
 });
 
 export const orderItems = pgTable('order_items', {
-  id: serial('id').primaryKey(),
-  orderId: integer('order_id').references(() => orders.id).notNull(),
-  productId: integer('product_id').references(() => products.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  orderId: uuid('order_id').references(() => orders.id).notNull(),
+  productId: uuid('product_id').references(() => products.id).notNull(),
   quantity: doublePrecision('quantity').notNull(),
   priceAtPurchase: doublePrecision('price_at_purchase').notNull(),
 });
 
 // --- 5. TƯƠNG TÁC & THÔNG BÁO (Interaction & Chat) ---
 export const reviews = pgTable('reviews', {
-  id: serial('id').primaryKey(),
-  productId: integer('product_id').references(() => products.id).notNull(),
-  buyerId: integer('buyer_id').references(() => users.id).notNull(),
-  orderId: integer('order_id').references(() => orders.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  productId: uuid('product_id').references(() => products.id).notNull(),
+  buyerId: uuid('buyer_id').references(() => users.id).notNull(),
+  orderId: uuid('order_id').references(() => orders.id).notNull(),
   rating: integer('rating').notNull(),
   comment: text('comment'),
   images: text('images').array(),
@@ -161,25 +179,25 @@ export const reviews = pgTable('reviews', {
 });
 
 export const conversations = pgTable('conversations', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id').references(() => users.id).notNull(),
-  shopId: integer('shop_id').references(() => shops.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
+  shopId: uuid('shop_id').references(() => shops.id).notNull(),
   lastMessage: text('last_message'),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
 export const messages = pgTable('messages', {
-  id: serial('id').primaryKey(),
-  conversationId: integer('conversation_id').references(() => conversations.id).notNull(),
-  senderId: integer('sender_id').references(() => users.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  conversationId: uuid('conversation_id').references(() => conversations.id).notNull(),
+  senderId: uuid('sender_id').references(() => users.id).notNull(),
   content: text('content').notNull(),
   isRead: boolean('is_read').default(false),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
 export const notifications = pgTable('notifications', {
-  id: serial('id').primaryKey(),
-  userId: integer('user_id').references(() => users.id).notNull(),
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').references(() => users.id).notNull(),
   title: text('title').notNull(),
   content: text('content').notNull(),
   type: varchar('type', { length: 50 }), // 'order', 'chat', 'diary_update'

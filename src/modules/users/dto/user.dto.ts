@@ -1,5 +1,5 @@
 export class UserDto {
-    id!: number;
+    id!: string;
     firebaseUid!: string;
     phone!: string;
     fullName!: string;

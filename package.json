@@ -21,7 +21,8 @@
     "db:generate-erd": "drizzle-erd",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "ts-node src/core/database/migrate.ts",
-    "db:seed": "ts-node src/core/database/seed.ts"
+    "db:seed": "ts-node src/core/database/seed.ts",
+    "db:seed:admin": "ts-node src/core/database/seed-admin.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2",

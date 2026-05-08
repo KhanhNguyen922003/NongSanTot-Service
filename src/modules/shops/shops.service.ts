@@ -28,7 +28,6 @@ export class ShopsService {
     const fallbackDisplayAddress = [
       payload.detail,
       payload.ward,
-      payload.district,
       payload.province,
     ]
       .map((value) => value?.trim())

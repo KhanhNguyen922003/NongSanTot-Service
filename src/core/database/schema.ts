@@ -93,6 +93,8 @@ export const products = pgTable('products', {
   images: text('images').array(),
   videos: text('videos').array(),
   shippingMethods: text('shipping_methods').array(), // ['GHTK', 'SELF_DELIVERY']
+  pickupAddressSnapshot: jsonb('pickup_address_snapshot'),
+  preferredShippingServiceId: integer('preferred_shipping_service_id'),
   
   // Thống kê nhanh (Denormalization)
   averageRating: doublePrecision('average_rating').default(0),

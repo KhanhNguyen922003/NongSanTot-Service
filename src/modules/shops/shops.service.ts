@@ -3,9 +3,18 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import { db } from '@/core/database/db';
-import { addresses, shops, users } from '@/core/database/schema';
+import {
+  addresses,
+  conversations,
+  messages,
+  orders,
+  products,
+  reviews,
+  shops,
+  users,
+} from '@/core/database/schema';
 import { AuthService } from '@/modules/auth/auth.service';
 import type { AuthenticatedUser } from '@/modules/auth/interfaces/authenticated-user.interface';
 import type { CreateShopDto } from './dto/create-shop.dto';
@@ -74,6 +83,140 @@ export class ShopsService {
     return db.query.shops.findFirst({
       where: eq(shops.ownerId, appUser.id),
     });
+  }
+
+  /**
+   * Số liệu tổng quan cho seller: đơn theo trạng thái, sản phẩm, đánh giá mới, tin chưa đọc.
+   */
+  async getMyDashboardOverview(currentUser: AuthenticatedUser) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.ownerId, appUser.id),
+    });
+    if (!shop) return null;
+
+    const shopId = shop.id;
+    const LOW_STOCK_THRESHOLD = 10;
+
+    const orderRows = await db
+      .select({
+        status: orders.status,
+        cnt: sql<number>`count(*)::int`,
+      })
+      .from(orders)
+      .where(eq(orders.shopId, shopId))
+      .groupBy(orders.status);
+
+    const ordersByStatus = {
+      pending: 0,
+      confirmed: 0,
+      processing: 0,
+      shipping: 0,
+      delivered: 0,
+      cancelled: 0,
+    };
+    let ordersTotal = 0;
+    for (const row of orderRows) {
+      const n = Number(row.cnt);
+      if (row.status && row.status in ordersByStatus) {
+        ordersByStatus[row.status as keyof typeof ordersByStatus] = n;
+      }
+      ordersTotal += n;
+    }
+
+    const productRows = await db
+      .select({
+        status: products.status,
+        cnt: sql<number>`count(*)::int`,
+      })
+      .from(products)
+      .where(eq(products.shopId, shopId))
+      .groupBy(products.status);
+
+    const productsByStatus = {
+      draft: 0,
+      pending_review: 0,
+      active: 0,
+      rejected: 0,
+      archived: 0,
+    };
+    let productsTotal = 0;
+    for (const row of productRows) {
+      const n = Number(row.cnt);
+      if (row.status && row.status in productsByStatus) {
+        productsByStatus[row.status as keyof typeof productsByStatus] = n;
+      }
+      productsTotal += n;
+    }
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [reviewRow] = await db
+      .select({ cnt: sql<number>`count(*)::int` })
+      .from(reviews)
+      .innerJoin(products, eq(reviews.productId, products.id))
+      .where(
+        and(eq(products.shopId, shopId), gte(reviews.createdAt, sevenDaysAgo)),
+      );
+
+    const [unreadRow] = await db
+      .select({ cnt: sql<number>`count(*)::int` })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(
+        and(
+          eq(conversations.shopId, shopId),
+          ne(messages.senderId, appUser.id),
+          eq(messages.isRead, false),
+        ),
+      );
+
+    const [lowStockRow] = await db
+      .select({ cnt: sql<number>`count(*)::int` })
+      .from(products)
+      .where(
+        and(
+          eq(products.shopId, shopId),
+          eq(products.status, 'active'),
+          lte(products.stock, LOW_STOCK_THRESHOLD),
+        ),
+      );
+
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const [revenueRow] = await db
+      .select({
+        total: sql<number>`coalesce(sum(${orders.finalPrice}), 0)::float`,
+      })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.shopId, shopId),
+          eq(orders.status, 'delivered'),
+          gte(orders.createdAt, thirtyDaysAgo),
+        ),
+      );
+
+    return {
+      shop: {
+        id: shop.id,
+        name: shop.name,
+        isActive: shop.isActive,
+        rating: shop.rating,
+        updatedAt: shop.updatedAt,
+      },
+      ordersByStatus,
+      ordersTotal,
+      productsByStatus,
+      productsTotal,
+      productsLowStockCount: Number(lowStockRow?.cnt ?? 0),
+      lowStockThreshold: LOW_STOCK_THRESHOLD,
+      newReviewsLast7Days: Number(reviewRow?.cnt ?? 0),
+      unreadBuyerMessages: Number(unreadRow?.cnt ?? 0),
+      revenueDeliveredLast30Days: Number(revenueRow?.total ?? 0),
+    };
   }
 
   async updateMine(

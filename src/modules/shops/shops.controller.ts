@@ -19,6 +19,11 @@ import { ShopsService } from './shops.service';
 export class ShopsController {
   constructor(private readonly shopsService: ShopsService) {}
 
+  @Get('me/dashboard')
+  getMyDashboard(@CurrentUser() currentUser: AuthenticatedUser) {
+    return this.shopsService.getMyDashboardOverview(currentUser);
+  }
+
   @Get('me')
   getMyShops(@CurrentUser() currentUser: AuthenticatedUser) {
     return this.shopsService.getMine(currentUser);

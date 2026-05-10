@@ -1,83 +1,52 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
+import { inArray } from 'drizzle-orm';
 import * as schema from './schema';
 
 const sql = neon(process.env.DATABASE_URL!);
 const db = drizzle(sql, { schema });
 
-async function seed() {
-  console.log('🌱 Bắt đầu seed data...');
+// Categories from the original nong-san-tot project (9 main categories)
+const categorySeeds = [
+  { name: 'Bánh, kẹo, đồ ăn vặt', slug: 'banh-keo-do-an-vat', icon: 'Package' },
+  { name: 'Bơ, Sữa, Trứng', slug: 'bo-sua-trung', icon: 'Milk' },
+  { name: 'Đồ Khô, mắm, gia vị', slug: 'do-kho-mam-gia-vi', icon: 'Sprout' },
+  { name: 'Đồ uống - giải khát', slug: 'do-uong-giai-khat', icon: 'Coffee' },
+  { name: 'Rau, củ, trái cây', slug: 'rau-cu-trai-cay', icon: 'Carrot' },
+  { name: 'Thịt', slug: 'thit', icon: 'Drumstick' },
+  { name: 'Thực phẩm chế biến sẵn', slug: 'thuc-pham-che-bien-san', icon: 'UtensilsCrossed' },
+  { name: 'Hải Sản', slug: 'hai-san', icon: 'Fish' },
+  { name: 'Thực phẩm khác', slug: 'thuc-pham-khac', icon: 'Package' },
+];
 
-  // 1. Tạo Users mẫu
-  console.log('...Creating users');
-  const [adminUser] = await db.insert(schema.users).values({
-    phone: '0901234567',
-    fullName: 'Admin NongSanTot',
-    role: 'admin',
-    avatar: 'https://i.pravatar.cc/300',
-  }).returning();
+async function seedCategories() {
+  const existingCategories = await db.query.categories.findMany({
+    where: inArray(schema.categories.slug, categorySeeds.map((item) => item.slug)),
+  });
 
-  const [sellerUser] = await db.insert(schema.users).values({
-    phone: '0909888777',
-    fullName: 'Nông Dân Ba',
-    role: 'seller',
-    avatar: 'https://i.pravatar.cc/300',
-  }).returning();
+  const existingSlugSet = new Set(existingCategories.map((item) => item.slug));
+  const missingCategories = categorySeeds.filter((item) => !existingSlugSet.has(item.slug));
 
-  // 2. Tạo Shop mẫu
-  console.log('...Creating shops');
-  const [shop] = await db.insert(schema.shops).values({
-    ownerId: sellerUser.id,
-    name: 'Vườn Trái Cây Ba Mập',
-    description: 'Chuyên cung cấp sầu riêng, măng cụt Lái Thiêu',
-    displayAddress: 'Lái Thiêu, Bình Dương',
-  }).returning();
-
-  // 3. Tạo Categories
-  console.log('...Creating categories');
-  const categoriesData = [
-    { name: 'Trái Cây', slug: 'trai-cay', icon: 'apple' },
-    { name: 'Rau Củ', slug: 'rau-cu', icon: 'carrot' },
-    { name: 'Thịt Trứng', slug: 'thit-trung', icon: 'egg' },
-  ];
-  
-  // Dùng insert ... on conflict do nothing nếu chạy lại
-  const insertedCategories = await db.insert(schema.categories)
-    .values(categoriesData)
-    .onConflictDoNothing() 
-    .returning();
-
-  // 4. Tạo Products mẫu
-  if (insertedCategories.length > 0) {
-    console.log('...Creating products');
-    await db.insert(schema.products).values([
-      {
-        shopId: shop.id,
-        categoryId: insertedCategories[0].id,
-        name: 'Sầu Riêng Ri6',
-        description: 'Sầu riêng chín cây thơm ngon, bao ăn.',
-        origin: 'Bình Dương',
-        price: 150000,
-        stock: 100,
-        unit: 'kg',
-        images: ['https://example.com/saurieng.jpg'],
-      },
-      {
-        shopId: shop.id,
-        categoryId: insertedCategories[0].id,
-        name: 'Măng Cụt',
-        description: 'Măng cụt ngọt thanh, không mủ.',
-        origin: 'Bình Dương',
-        price: 60000,
-        stock: 50,
-        unit: 'kg',
-        images: ['https://example.com/mangcut.jpg'],
-      },
-    ]);
+  if (missingCategories.length > 0) {
+    await db.insert(schema.categories).values(missingCategories).onConflictDoNothing();
   }
 
-  console.log('✅ Seed data thành công!');
+  return db.query.categories.findMany({
+    where: inArray(schema.categories.slug, categorySeeds.map((item) => item.slug)),
+  });
+}
+
+async function seed() {
+  console.log('🌱 Bắt đầu seed categories...');
+
+  try {
+    const categories = await seedCategories();
+    console.log(`✅ Seed ${categories.length} categories thành công!`);
+  } catch (error) {
+    console.error('❌ Seed categories thất bại:', error);
+    throw error;
+  }
 }
 
 seed().catch((err) => {

@@ -89,6 +89,7 @@ export const products = pgTable('products', {
   price: doublePrecision('price').notNull(),
   stock: doublePrecision('stock').notNull(),
   unit: varchar('unit', { length: 20 }).default('kg'),
+  tags: text('tags').array(),
   coverImage: text('cover_image'),
   images: text('images').array(),
   videos: text('videos').array(),

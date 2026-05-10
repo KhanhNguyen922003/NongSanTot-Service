@@ -1,0 +1,689 @@
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { and, eq } from 'drizzle-orm';
+import axios from 'axios';
+import { db } from '@/core/database/db';
+import {
+  addresses,
+  cartItems,
+  carts,
+  orderItems,
+  orders,
+  products,
+  shops,
+} from '@/core/database/schema';
+import { AuthService } from '@/modules/auth/auth.service';
+import type { AuthenticatedUser } from '@/modules/auth/interfaces/authenticated-user.interface';
+import type { CheckoutOrdersDto } from './dto/checkout-orders.dto';
+import type { ConfirmOrderDto } from './dto/confirm-order.dto';
+
+type ShippingAddressSnapshot = {
+  addressId: string;
+  receiverName: string;
+  receiverPhone: string;
+  province: string;
+  ward: string;
+  detail: string;
+};
+
+type CartLine = {
+  id: string;
+  productId: string;
+  quantity: number;
+  productPrice: number;
+  productName: string;
+  productUnit: string | null;
+  shopId: string;
+  shopName: string;
+};
+
+type ShippingQuote = {
+  fee: number;
+  feeText: string;
+  isMock: boolean;
+};
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly authService: AuthService) {}
+
+  async quoteShippingForMyCart(
+    currentUser: AuthenticatedUser,
+    shippingAddressId: string,
+    fastShipping = false,
+  ) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const buyerAddress = await this.ensureAddressOfUser(shippingAddressId, appUser.id);
+    const cart = await this.ensureMyCart(appUser.id);
+    const items = await this.loadCartItems(cart.id);
+    if (!items.length) {
+      throw new BadRequestException('Giỏ hàng trống');
+    }
+
+    const groupedByShop = this.groupCartItemsByShop(items);
+    const quotes = await Promise.all(
+      groupedByShop.map(async (group) => {
+        const pickAddress = await this.ensureShopPickAddress(group.shopId);
+        const quote = await this.quoteShippingFee({
+          pickAddress: pickAddress.detail,
+          pickProvince: pickAddress.province,
+          pickDistrict: this.resolveDistrictLikeField(
+            pickAddress.detail,
+            pickAddress.ward,
+            pickAddress.province,
+          ),
+          pickWard: pickAddress.ward,
+          address: buyerAddress.detail,
+          province: buyerAddress.province,
+          district: this.resolveDistrictLikeField(
+            buyerAddress.detail,
+            buyerAddress.ward,
+            buyerAddress.province,
+          ),
+          ward: buyerAddress.ward,
+          weight: this.calculateGroupWeightGram(group.items),
+          fastShipping,
+        });
+        const itemsTotal = group.items.reduce(
+          (sum, item) => sum + item.productPrice * item.quantity,
+          0,
+        );
+        return {
+          shopId: group.shopId,
+          shopName: group.shopName,
+          shippingFee: quote.fee,
+          shippingFeeText: quote.feeText,
+          isMock: quote.isMock,
+          itemsTotal,
+          finalTotal: itemsTotal + quote.fee,
+        };
+      }),
+    );
+
+    return {
+      shippingAddressId,
+      fastShipping,
+      quotes,
+      totals: {
+        itemsTotal: quotes.reduce((sum, q) => sum + q.itemsTotal, 0),
+        shippingTotal: quotes.reduce((sum, q) => sum + q.shippingFee, 0),
+        finalTotal: quotes.reduce((sum, q) => sum + q.finalTotal, 0),
+      },
+    };
+  }
+
+  async checkoutFromMyCart(currentUser: AuthenticatedUser, payload: CheckoutOrdersDto) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const buyerAddress = await this.ensureAddressOfUser(payload.shippingAddressId, appUser.id);
+    const cart = await this.ensureMyCart(appUser.id);
+    const items = await this.loadCartItems(cart.id);
+    if (!items.length) {
+      throw new BadRequestException('Giỏ hàng trống');
+    }
+
+    const groupedByShop = this.groupCartItemsByShop(items);
+    const createdOrders = await Promise.all(
+      groupedByShop.map(async (group) => {
+        const pickAddress = await this.ensureShopPickAddress(group.shopId);
+        const quote = await this.quoteShippingFee({
+          pickAddress: pickAddress.detail,
+          pickProvince: pickAddress.province,
+          pickDistrict: this.resolveDistrictLikeField(
+            pickAddress.detail,
+            pickAddress.ward,
+            pickAddress.province,
+          ),
+          pickWard: pickAddress.ward,
+          address: buyerAddress.detail,
+          province: buyerAddress.province,
+          district: this.resolveDistrictLikeField(
+            buyerAddress.detail,
+            buyerAddress.ward,
+            buyerAddress.province,
+          ),
+          ward: buyerAddress.ward,
+          weight: this.calculateGroupWeightGram(group.items),
+          fastShipping: payload.fastShipping ?? false,
+        });
+
+        const itemsTotal = group.items.reduce(
+          (sum, item) => sum + item.productPrice * item.quantity,
+          0,
+        );
+        const shippingFee = quote.fee;
+        const finalPrice = itemsTotal + shippingFee;
+        const snapshot: ShippingAddressSnapshot = {
+          addressId: buyerAddress.id,
+          receiverName: buyerAddress.receiverName,
+          receiverPhone: buyerAddress.receiverPhone,
+          province: buyerAddress.province,
+          ward: buyerAddress.ward,
+          detail: buyerAddress.detail,
+        };
+
+        const [createdOrder] = await db
+          .insert(orders)
+          .values({
+            buyerId: appUser.id,
+            shopId: group.shopId,
+            shippingAddressSnapshot: JSON.stringify(snapshot),
+            actualPickAddressId: pickAddress.id,
+            totalPrice: itemsTotal,
+            shippingFee,
+            finalPrice,
+            status: 'pending',
+            note: payload.note,
+            createdAt: new Date(),
+          })
+          .returning();
+
+        await db.insert(orderItems).values(
+          group.items.map((item) => ({
+            orderId: createdOrder.id,
+            productId: item.productId,
+            quantity: item.quantity,
+            priceAtPurchase: item.productPrice,
+          })),
+        );
+
+        return createdOrder;
+      }),
+    );
+
+    await Promise.all(
+      items.map((item) => db.delete(cartItems).where(eq(cartItems.id, item.id))),
+    );
+
+    return {
+      success: true,
+      orders: createdOrders,
+      message: 'Đặt hàng thành công. Đơn đang chờ shop xác nhận.',
+    };
+  }
+
+  async getMyBuyOrders(currentUser: AuthenticatedUser) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    return db.query.orders.findMany({
+      where: eq(orders.buyerId, appUser.id),
+      orderBy: (table, { desc }) => [desc(table.createdAt)],
+    });
+  }
+
+  async getMySellOrders(currentUser: AuthenticatedUser) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.ownerId, appUser.id),
+    });
+    if (!shop) return [];
+
+    return db.query.orders.findMany({
+      where: eq(orders.shopId, shop.id),
+      orderBy: (table, { desc }) => [desc(table.createdAt)],
+    });
+  }
+
+  async getOrderDetail(currentUser: AuthenticatedUser, orderId: string) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, order.shopId),
+    });
+    const canRead =
+      order.buyerId === appUser.id || (shop && shop.ownerId === appUser.id);
+    if (!canRead) {
+      throw new ForbiddenException('Bạn không có quyền truy cập đơn hàng này');
+    }
+
+    const items = await db
+      .select({
+        id: orderItems.id,
+        orderId: orderItems.orderId,
+        productId: orderItems.productId,
+        quantity: orderItems.quantity,
+        priceAtPurchase: orderItems.priceAtPurchase,
+        productName: products.name,
+        productCoverImage: products.coverImage,
+      })
+      .from(orderItems)
+      .leftJoin(products, eq(orderItems.productId, products.id))
+      .where(eq(orderItems.orderId, order.id));
+
+    return {
+      ...order,
+      shippingAddressSnapshot: this.safeParseSnapshot(order.shippingAddressSnapshot),
+      items,
+      shop,
+    };
+  }
+
+  async confirmOrderBySeller(
+    currentUser: AuthenticatedUser,
+    orderId: string,
+    payload: ConfirmOrderDto,
+  ) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, order.shopId),
+    });
+    if (!shop || shop.ownerId !== appUser.id) {
+      throw new ForbiddenException('Bạn không có quyền xác nhận đơn này');
+    }
+    if (order.status !== 'pending') {
+      throw new BadRequestException('Chỉ đơn pending mới có thể xác nhận');
+    }
+
+    const shippingSnapshot = this.safeParseSnapshot(order.shippingAddressSnapshot);
+    if (!shippingSnapshot) {
+      throw new BadRequestException('Đơn hàng thiếu snapshot địa chỉ giao');
+    }
+
+    const pickAddress = payload.actualPickAddressId
+      ? await this.ensureAddressOfUser(payload.actualPickAddressId, appUser.id)
+      : await this.ensureShopPickAddress(order.shopId);
+
+    const quote = await this.quoteShippingFee({
+      pickAddress: pickAddress.detail,
+      pickProvince: pickAddress.province,
+      pickDistrict: this.resolveDistrictLikeField(
+        pickAddress.detail,
+        pickAddress.ward,
+        pickAddress.province,
+      ),
+      pickWard: pickAddress.ward,
+      address: shippingSnapshot.detail,
+      province: shippingSnapshot.province,
+      district: this.resolveDistrictLikeField(
+        shippingSnapshot.detail,
+        shippingSnapshot.ward,
+        shippingSnapshot.province,
+      ),
+      ward: shippingSnapshot.ward,
+      weight: await this.calculateOrderWeightGram(order.id),
+      fastShipping: payload.fastShipping ?? false,
+    });
+
+    const ghtkOrder = await this.createGhtkOrder({
+      order,
+      pickAddress,
+      shippingSnapshot,
+      fastShipping: payload.fastShipping ?? false,
+    });
+
+    const [updated] = await db
+      .update(orders)
+      .set({
+        status: 'confirmed',
+        actualPickAddressId: pickAddress.id,
+        shippingFee: quote.fee,
+        finalPrice: order.totalPrice + quote.fee,
+        shippingCode: ghtkOrder.trackingCode,
+        note: ghtkOrder.message ? `${order.note || ''}\n${ghtkOrder.message}`.trim() : order.note,
+      })
+      .where(eq(orders.id, orderId))
+      .returning();
+
+    return {
+      ...updated,
+      ghtk: ghtkOrder,
+    };
+  }
+
+  async cancelOrder(currentUser: AuthenticatedUser, orderId: string) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, order.shopId),
+    });
+    const canCancel =
+      order.buyerId === appUser.id || (shop && shop.ownerId === appUser.id);
+    if (!canCancel) {
+      throw new ForbiddenException('Bạn không có quyền hủy đơn này');
+    }
+
+    if (order.status === 'delivered' || order.status === 'cancelled') {
+      throw new BadRequestException('Đơn đã hoàn tất hoặc đã hủy');
+    }
+
+    const [updated] = await db
+      .update(orders)
+      .set({ status: 'cancelled' })
+      .where(eq(orders.id, orderId))
+      .returning();
+    return updated;
+  }
+
+  private async ensureMyCart(userId: string) {
+    const existing = await db.query.carts.findFirst({
+      where: eq(carts.userId, userId),
+    });
+    if (existing) return existing;
+    const [created] = await db.insert(carts).values({ userId }).returning();
+    return created;
+  }
+
+  private async ensureAddressOfUser(addressId: string, userId: string) {
+    const address = await db.query.addresses.findFirst({
+      where: and(eq(addresses.id, addressId), eq(addresses.userId, userId)),
+    });
+    if (!address) {
+      throw new NotFoundException('Address not found');
+    }
+    return address;
+  }
+
+  private async ensureShopPickAddress(shopId: string) {
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, shopId),
+    });
+    if (!shop) throw new NotFoundException('Shop not found');
+    if (!shop.defaultPickAddressId) {
+      throw new BadRequestException(`Shop ${shop.name} chưa cấu hình địa chỉ lấy hàng mặc định`);
+    }
+
+    const address = await db.query.addresses.findFirst({
+      where: eq(addresses.id, shop.defaultPickAddressId),
+    });
+    if (!address) throw new NotFoundException('Shop pick address not found');
+    return address;
+  }
+
+  private async loadCartItems(cartId: string): Promise<CartLine[]> {
+    const rows = await db
+      .select({
+        id: cartItems.id,
+        productId: cartItems.productId,
+        quantity: cartItems.quantity,
+        productPrice: products.price,
+        productName: products.name,
+        productUnit: products.unit,
+        productStatus: products.status,
+        productIsAvailable: products.isAvailable,
+        shopId: shops.id,
+        shopName: shops.name,
+      })
+      .from(cartItems)
+      .leftJoin(products, eq(cartItems.productId, products.id))
+      .leftJoin(shops, eq(products.shopId, shops.id))
+      .where(eq(cartItems.cartId, cartId));
+
+    const invalid = rows.find(
+      (item) =>
+        !item.shopId ||
+        item.productStatus !== 'active' ||
+        item.productIsAvailable !== true,
+    );
+    if (invalid) {
+      throw new BadRequestException('Có sản phẩm trong giỏ không còn sẵn sàng để mua');
+    }
+
+    return rows.map((item) => ({
+      id: item.id,
+      productId: item.productId,
+      quantity: item.quantity,
+      productPrice: item.productPrice ?? 0,
+      productName: item.productName ?? 'Sản phẩm',
+      productUnit: item.productUnit,
+      shopId: item.shopId as string,
+      shopName: item.shopName ?? 'Shop',
+    }));
+  }
+
+  private groupCartItemsByShop(items: CartLine[]) {
+    const map = new Map<string, { shopId: string; shopName: string; items: CartLine[] }>();
+    items.forEach((item) => {
+      const existing = map.get(item.shopId);
+      if (existing) {
+        existing.items.push(item);
+        return;
+      }
+      map.set(item.shopId, {
+        shopId: item.shopId,
+        shopName: item.shopName,
+        items: [item],
+      });
+    });
+    return Array.from(map.values());
+  }
+
+  private async quoteShippingFee(payload: {
+    pickAddress?: string;
+    pickProvince: string;
+    pickDistrict: string;
+    pickWard?: string;
+    address?: string;
+    province: string;
+    district: string;
+    ward?: string;
+    weight: number;
+    fastShipping: boolean;
+  }): Promise<ShippingQuote> {
+    const apiToken = process.env.GHTK_API_TOKEN;
+    const apiUrl = process.env.GHTK_API_URL || 'https://services.giaohangtietkiem.vn';
+
+    if (!apiToken) {
+      const fee = payload.fastShipping ? 42000 : 32000;
+      return {
+        fee,
+        feeText: `${fee.toLocaleString('vi-VN')}đ`,
+        isMock: true,
+      };
+    }
+
+    const response = await axios.get(`${apiUrl}/services/shipment/fee`, {
+      headers: {
+        Token: apiToken,
+      },
+      params: {
+        pick_address: payload.pickAddress,
+        pick_province: payload.pickProvince,
+        pick_district: payload.pickDistrict,
+        pick_ward: payload.pickWard,
+        address: payload.address,
+        province: payload.province,
+        district: payload.district,
+        ward: payload.ward,
+        weight: payload.weight,
+        deliver_option: payload.fastShipping ? 'xteam' : 'none',
+      },
+    });
+
+    const shipMoney = response.data?.fee?.options?.shipMoney ?? response.data?.fee?.fee ?? 0;
+    return {
+      fee: shipMoney,
+      feeText: `${shipMoney.toLocaleString('vi-VN')}đ`,
+      isMock: false,
+    };
+  }
+
+  private async createGhtkOrder(payload: {
+    order: typeof orders.$inferSelect;
+    pickAddress: typeof addresses.$inferSelect;
+    shippingSnapshot: ShippingAddressSnapshot;
+    fastShipping: boolean;
+  }) {
+    const apiToken = process.env.GHTK_API_TOKEN;
+    const apiUrl = process.env.GHTK_API_URL || 'https://services.giaohangtietkiem.vn';
+
+    if (!apiToken) {
+      return {
+        success: true,
+        trackingCode: `MOCK-${Date.now()}`,
+        message: 'Mock GHTK: chưa cấu hình GHTK_API_TOKEN.',
+      };
+    }
+
+    const lines = await db
+      .select({
+        productName: products.name,
+        quantity: orderItems.quantity,
+        productUnit: products.unit,
+      })
+      .from(orderItems)
+      .leftJoin(products, eq(orderItems.productId, products.id))
+      .where(eq(orderItems.orderId, payload.order.id));
+
+    const requestBody = {
+      products: lines.map((line, index) => ({
+        name: line.productName || `product-${index + 1}`,
+        weight: this.estimateProductWeightKg(line.productUnit, line.quantity),
+        quantity: line.quantity,
+        product_code: index + 1,
+      })),
+      order: {
+        id: payload.order.id,
+        pick_name: payload.pickAddress.receiverName,
+        pick_address: payload.pickAddress.detail,
+        pick_province: payload.pickAddress.province,
+        pick_district: this.resolveDistrictLikeField(
+          payload.pickAddress.detail,
+          payload.pickAddress.ward,
+          payload.pickAddress.province,
+        ),
+        pick_ward: payload.pickAddress.ward,
+        pick_tel: payload.pickAddress.receiverPhone,
+        tel: payload.shippingSnapshot.receiverPhone,
+        name: payload.shippingSnapshot.receiverName,
+        address: payload.shippingSnapshot.detail,
+        province: payload.shippingSnapshot.province,
+        district: this.resolveDistrictLikeField(
+          payload.shippingSnapshot.detail,
+          payload.shippingSnapshot.ward,
+          payload.shippingSnapshot.province,
+        ),
+        ward: payload.shippingSnapshot.ward,
+        hamlet: 'Khac',
+        pick_money: payload.order.finalPrice,
+        note: payload.order.note || `Order ${payload.order.id}`,
+        value: payload.order.finalPrice,
+        pick_option: 'cod',
+        deliver_option: payload.fastShipping ? 'xteam' : 'none',
+      },
+    };
+
+    const response = await axios.post(`${apiUrl}/services/shipment/order`, requestBody, {
+      headers: {
+        Token: apiToken,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const trackingCode =
+      String(response.data?.order?.tracking_id ?? response.data?.order?.label ?? '');
+
+    if (!trackingCode) {
+      throw new BadRequestException('Tạo đơn GHTK thất bại: thiếu tracking id');
+    }
+
+    return {
+      success: true,
+      trackingCode,
+      message: response.data?.message as string | undefined,
+    };
+  }
+
+  private safeParseSnapshot(value: string) {
+    try {
+      return JSON.parse(value) as ShippingAddressSnapshot;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * District field vẫn là required trong nhiều endpoint GHTK.
+   * Trong model địa chỉ mới không có district, nên normalize theo thứ tự:
+   * - tách từ chuỗi detail nếu có cấu trúc nhiều cấp
+   * - fallback ward
+   * - fallback province
+   */
+  private resolveDistrictLikeField(
+    detail: string | undefined,
+    ward: string | undefined,
+    province: string | undefined,
+  ) {
+    if (detail) {
+      const parts = detail
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean);
+      if (parts.length >= 2) {
+        return parts[parts.length - 2];
+      }
+    }
+
+    return ward || province || 'Khac';
+  }
+
+  /**
+   * GHTK fee API dùng gram.
+   * Khi chưa có cột trọng lượng chuẩn theo SKU, dùng heuristic theo đơn vị.
+   * TODO: thêm weightGram vào products để thay thế heuristic.
+   */
+  private calculateGroupWeightGram(items: CartLine[]) {
+    const total = items.reduce(
+      (sum, item) => sum + this.estimateItemWeightGram(item.productUnit, item.quantity),
+      0,
+    );
+    return Math.max(total, 100);
+  }
+
+  private async calculateOrderWeightGram(orderId: string) {
+    const lines = await db
+      .select({
+        quantity: orderItems.quantity,
+        productUnit: products.unit,
+      })
+      .from(orderItems)
+      .leftJoin(products, eq(orderItems.productId, products.id))
+      .where(eq(orderItems.orderId, orderId));
+
+    const total = lines.reduce(
+      (sum, line) => sum + this.estimateItemWeightGram(line.productUnit, line.quantity),
+      0,
+    );
+    return Math.max(total, 100);
+  }
+
+  private estimateItemWeightGram(unit: string | null, quantity: number) {
+    const normalized = (unit || '').toLowerCase();
+    const qty = Math.max(quantity, 1);
+
+    if (normalized === 'kg') return Math.round(qty * 1000);
+    if (normalized === 'g') return Math.round(qty);
+    if (normalized === 'mg') return Math.round(qty / 1000);
+    if (normalized === 'tấn') return Math.round(qty * 1_000_000);
+    if (normalized === 'tạ') return Math.round(qty * 100_000);
+    if (normalized === 'yến') return Math.round(qty * 10_000);
+
+    // Đơn vị rời: dùng default 500g / item
+    return Math.round(qty * 500);
+  }
+
+  /**
+   * GHTK order payload thường kỳ vọng kg cho từng dòng sản phẩm.
+   */
+  private estimateProductWeightKg(unit: string | null, quantity: number) {
+    const gram = this.estimateItemWeightGram(unit, quantity);
+    return Number((gram / 1000).toFixed(3));
+  }
+}

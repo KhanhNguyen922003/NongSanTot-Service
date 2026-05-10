@@ -85,6 +85,12 @@ export class CreateProductDto {
   @MaxLength(20)
   unit!: string;
 
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(40, { each: true })
+  tags?: string[];
+
   @IsArray()
   @ArrayMaxSize(8)
   @IsUrl({ require_tld: false }, { each: true })

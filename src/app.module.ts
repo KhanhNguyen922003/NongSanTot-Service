@@ -10,6 +10,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { CartsModule } from './modules/carts/carts.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { CategoriesModule } from './modules/categories/categories.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { CategoriesModule } from './modules/categories/categories.module';
     CartsModule,
     OrdersModule,
     CategoriesModule,
+    MessagingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

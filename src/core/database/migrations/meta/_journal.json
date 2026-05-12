@@ -22,6 +22,20 @@
       "when": 1778394180455,
       "tag": "0002_mushy_wrecker",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1778428882818,
+      "tag": "0003_negotiation_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778500000000,
+      "tag": "0004_conversation_read_receipts",
+      "breakpoints": true
     }
   ]
 }

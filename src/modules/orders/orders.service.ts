@@ -11,6 +11,7 @@ import {
   addresses,
   cartItems,
   carts,
+  negotiationOffers,
   orderItems,
   orders,
   products,
@@ -18,6 +19,7 @@ import {
 } from '@/core/database/schema';
 import { AuthService } from '@/modules/auth/auth.service';
 import type { AuthenticatedUser } from '@/modules/auth/interfaces/authenticated-user.interface';
+import type { BuyerConfirmNegotiationOrderDto } from './dto/buyer-confirm-negotiation.dto';
 import type { CheckoutOrdersDto } from './dto/checkout-orders.dto';
 import type { ConfirmOrderDto } from './dto/confirm-order.dto';
 
@@ -29,6 +31,12 @@ type ShippingAddressSnapshot = {
   ward: string;
   detail: string;
 };
+
+type NegotiationAddressPlaceholder = {
+  negotiationPendingAddress: true;
+};
+
+type NegotiationOfferRow = typeof negotiationOffers.$inferSelect;
 
 type CartLine = {
   id: string;
@@ -259,11 +267,16 @@ export class OrdersService {
       .leftJoin(products, eq(orderItems.productId, products.id))
       .where(eq(orderItems.orderId, order.id));
 
+    const snapshot = this.safeParseSnapshot(order.shippingAddressSnapshot);
+
     return {
       ...order,
-      shippingAddressSnapshot: this.safeParseSnapshot(order.shippingAddressSnapshot),
+      shippingAddressSnapshot: snapshot,
       items,
       shop,
+      negotiationAwaitingBuyerAddress:
+        order.status === 'awaiting_buyer_address' &&
+        this.isNegotiationAddressPlaceholder(order.shippingAddressSnapshot),
     };
   }
 
@@ -370,6 +383,164 @@ export class OrdersService {
       .where(eq(orders.id, orderId))
       .returning();
     return updated;
+  }
+
+  /**
+   * Seller tạo đơn sau khi hai bên đã chấp nhận thẻ giá — chờ buyer nhập địa chỉ giao.
+   */
+  async createOrderFromNegotiationOffer(params: {
+    sellerUserId: string;
+    buyerId: string;
+    shopId: string;
+    offer: NegotiationOfferRow;
+    note?: string;
+  }) {
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, params.shopId),
+    });
+    if (!shop || shop.ownerId !== params.sellerUserId) {
+      throw new ForbiddenException('Bạn không có quyền tạo đơn cho shop này');
+    }
+
+    const dup = await db.query.orders.findFirst({
+      where: eq(orders.negotiationOfferId, params.offer.id),
+    });
+    if (dup) {
+      throw new BadRequestException('Đã tạo đơn từ thẻ thương lượng này');
+    }
+
+    const product = await db.query.products.findFirst({
+      where: eq(products.id, params.offer.productId),
+    });
+    if (!product || product.status !== 'active' || product.isAvailable !== true) {
+      throw new BadRequestException('Sản phẩm không còn bán');
+    }
+    if (params.offer.quantity > product.stock) {
+      throw new BadRequestException('Số lượng vượt tồn kho');
+    }
+    if (product.shopId !== params.shopId) {
+      throw new BadRequestException('Sản phẩm không thuộc shop này');
+    }
+
+    const pickAddress = await this.ensureShopPickAddress(params.shopId);
+    const itemsTotal = params.offer.unitPrice * params.offer.quantity;
+    const placeholder = JSON.stringify({
+      negotiationPendingAddress: true,
+    } satisfies NegotiationAddressPlaceholder);
+
+    const [createdOrder] = await db
+      .insert(orders)
+      .values({
+        buyerId: params.buyerId,
+        shopId: params.shopId,
+        shippingAddressSnapshot: placeholder,
+        actualPickAddressId: pickAddress.id,
+        totalPrice: itemsTotal,
+        shippingFee: 0,
+        finalPrice: itemsTotal,
+        status: 'awaiting_buyer_address',
+        note: params.note,
+        negotiationOfferId: params.offer.id,
+        createdAt: new Date(),
+      })
+      .returning();
+
+    await db.insert(orderItems).values({
+      orderId: createdOrder.id,
+      productId: params.offer.productId,
+      quantity: params.offer.quantity,
+      priceAtPurchase: params.offer.unitPrice,
+    });
+
+    return createdOrder;
+  }
+
+  async buyerConfirmNegotiationOrder(
+    currentUser: AuthenticatedUser,
+    orderId: string,
+    payload: BuyerConfirmNegotiationOrderDto,
+  ) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.buyerId !== appUser.id) {
+      throw new ForbiddenException('Chỉ người mua mới xác nhận địa chỉ cho đơn này');
+    }
+    if (order.status !== 'awaiting_buyer_address') {
+      throw new BadRequestException('Đơn không ở trạng thái chờ địa chỉ');
+    }
+    if (!this.isNegotiationAddressPlaceholder(order.shippingAddressSnapshot)) {
+      throw new BadRequestException('Đơn đã có địa chỉ giao');
+    }
+
+    const buyerAddress = await this.ensureAddressOfUser(
+      payload.shippingAddressId,
+      appUser.id,
+    );
+    const pickAddress = order.actualPickAddressId
+      ? await db.query.addresses.findFirst({
+          where: eq(addresses.id, order.actualPickAddressId),
+        })
+      : null;
+    const resolvedPick =
+      pickAddress && pickAddress.id ? pickAddress : await this.ensureShopPickAddress(order.shopId);
+
+    const quote = await this.quoteShippingFee({
+      pickAddress: resolvedPick.detail,
+      pickProvince: resolvedPick.province,
+      pickDistrict: this.resolveDistrictLikeField(
+        resolvedPick.detail,
+        resolvedPick.ward,
+        resolvedPick.province,
+      ),
+      pickWard: resolvedPick.ward,
+      address: buyerAddress.detail,
+      province: buyerAddress.province,
+      district: this.resolveDistrictLikeField(
+        buyerAddress.detail,
+        buyerAddress.ward,
+        buyerAddress.province,
+      ),
+      ward: buyerAddress.ward,
+      weight: await this.calculateOrderWeightGram(order.id),
+      fastShipping: payload.fastShipping ?? false,
+    });
+
+    const snapshot: ShippingAddressSnapshot = {
+      addressId: buyerAddress.id,
+      receiverName: buyerAddress.receiverName,
+      receiverPhone: buyerAddress.receiverPhone,
+      province: buyerAddress.province,
+      ward: buyerAddress.ward,
+      detail: buyerAddress.detail,
+    };
+
+    const shippingFee = quote.fee;
+    const finalPrice = order.totalPrice + shippingFee;
+
+    const [updated] = await db
+      .update(orders)
+      .set({
+        shippingAddressSnapshot: JSON.stringify(snapshot),
+        shippingFee,
+        finalPrice,
+        status: 'pending',
+      })
+      .where(eq(orders.id, orderId))
+      .returning();
+
+    return updated;
+  }
+
+  private isNegotiationAddressPlaceholder(value: string) {
+    try {
+      const o = JSON.parse(value) as NegotiationAddressPlaceholder | Record<string, unknown>;
+      return o && typeof o === 'object' && o.negotiationPendingAddress === true;
+    } catch {
+      return false;
+    }
   }
 
   private async ensureMyCart(userId: string) {

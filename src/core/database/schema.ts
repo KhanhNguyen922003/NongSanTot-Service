@@ -14,8 +14,25 @@ import {
 // --- ENUMS ---
 export const userRoleEnum = pgEnum('user_role', ['buyer', 'seller', 'admin']);
 export const orderStatusEnum = pgEnum('order_status', [
-  'pending', 'confirmed', 'processing', 'shipping', 'delivered', 'cancelled'
+  'pending',
+  'confirmed',
+  'processing',
+  'shipping',
+  'delivered',
+  'cancelled',
+  'awaiting_buyer_address',
 ]);
+export const negotiationOfferStatusEnum = pgEnum('negotiation_offer_status', [
+  'pending',
+  'accepted',
+  'superseded',
+  'declined',
+]);
+export const awaitingNegotiationPartyEnum = pgEnum('awaiting_negotiation_party', [
+  'buyer',
+  'seller',
+]);
+export const messageKindEnum = pgEnum('message_kind', ['text', 'offer']);
 export const productStatusEnum = pgEnum('product_status', [
   'draft', 'pending_review', 'active', 'rejected', 'archived'
 ]);
@@ -158,6 +175,8 @@ export const orders = pgTable('orders', {
   status: orderStatusEnum('status').default('pending'),
   shippingCode: varchar('shipping_code'), // Tracking code từ GHTK
   note: text('note'),
+  /** Liên kết đơn tạo sau khi đồng ý trả giá (snapshot địa chỉ ban đầu là placeholder JSON). */
+  negotiationOfferId: uuid('negotiation_offer_id'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -183,10 +202,35 @@ export const reviews = pgTable('reviews', {
 
 export const conversations = pgTable('conversations', {
   id: uuid('id').defaultRandom().primaryKey(),
+  /** Buyer (always the marketplace user initiating thread from product). */
   userId: uuid('user_id').references(() => users.id).notNull(),
   shopId: uuid('shop_id').references(() => shops.id).notNull(),
+  /** Sản phẩm ngữ cảnh (một luồng thương lượng gắn 1 SP). */
+  productId: uuid('product_id').references(() => products.id),
   lastMessage: text('last_message'),
   updatedAt: timestamp('updated_at').defaultNow(),
+  /** Mốc người mua đã xem tới (tin từ shop sau mốc này = chưa đọc với buyer). */
+  buyerLastReadAt: timestamp('buyer_last_read_at'),
+  /** Mốc chủ shop đã xem tới (tin từ buyer sau mốc = chưa đọc với seller). */
+  sellerLastReadAt: timestamp('seller_last_read_at'),
+});
+
+/** Một đề xuất / counter giá trong cuộc hội thoại. */
+export const negotiationOffers = pgTable('negotiation_offers', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  conversationId: uuid('conversation_id')
+    .references(() => conversations.id)
+    .notNull(),
+  productId: uuid('product_id').references(() => products.id).notNull(),
+  proposedByUserId: uuid('proposed_by_user_id')
+    .references(() => users.id)
+    .notNull(),
+  unitPrice: doublePrecision('unit_price').notNull(),
+  quantity: doublePrecision('quantity').notNull(),
+  awaitingParty: awaitingNegotiationPartyEnum('awaiting_party'),
+  status: negotiationOfferStatusEnum('status').default('pending').notNull(),
+  parentOfferId: uuid('parent_offer_id'),
+  createdAt: timestamp('created_at').defaultNow(),
 });
 
 export const messages = pgTable('messages', {
@@ -194,6 +238,8 @@ export const messages = pgTable('messages', {
   conversationId: uuid('conversation_id').references(() => conversations.id).notNull(),
   senderId: uuid('sender_id').references(() => users.id).notNull(),
   content: text('content').notNull(),
+  kind: messageKindEnum('kind').default('text').notNull(),
+  negotiationOfferId: uuid('negotiation_offer_id').references(() => negotiationOffers.id),
   isRead: boolean('is_read').default(false),
   createdAt: timestamp('created_at').defaultNow(),
 });

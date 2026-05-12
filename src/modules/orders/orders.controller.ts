@@ -11,6 +11,7 @@ import {
 import { CurrentUser } from '@/modules/auth/decorators/current-user.decorator';
 import { FirebaseAuthGuard } from '@/modules/auth/firebase-auth.guard';
 import type { AuthenticatedUser } from '@/modules/auth/interfaces/authenticated-user.interface';
+import { BuyerConfirmNegotiationOrderDto } from './dto/buyer-confirm-negotiation.dto';
 import { CheckoutOrdersDto } from './dto/checkout-orders.dto';
 import { ConfirmOrderDto } from './dto/confirm-order.dto';
 import { OrdersService } from './orders.service';
@@ -49,6 +50,15 @@ export class OrdersController {
   @Get('me/sell')
   getMySellOrders(@CurrentUser() currentUser: AuthenticatedUser) {
     return this.ordersService.getMySellOrders(currentUser);
+  }
+
+  @Patch(':id/negotiation/confirm-address')
+  buyerFinalizeNegotiation(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: BuyerConfirmNegotiationOrderDto,
+  ) {
+    return this.ordersService.buyerConfirmNegotiationOrder(currentUser, id, body);
   }
 
   @Get(':id')

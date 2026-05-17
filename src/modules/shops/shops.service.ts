@@ -271,6 +271,12 @@ export class ShopsService {
    * Trả về: shop info + số đơn đã giao + số sản phẩm + danh sách sản phẩm của shop
    */
   async getShopDetail(shopId: string) {
+    // Validate shopId is a UUID to avoid DB errors when non-UUID values
+    // (for example the string 'me') are passed to a UUID column.
+    const uuidV4Regex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+    if (!uuidV4Regex.test(shopId)) {
+      throw new BadRequestException('Invalid shop id');
+    }
     const shop = await db.query.shops.findFirst({
       where: and(eq(shops.id, shopId), eq(shops.isActive, true)),
     });

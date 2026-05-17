@@ -19,14 +19,6 @@ import { ShopsService } from './shops.service';
 export class ShopsController {
   constructor(private readonly shopsService: ShopsService) {}
 
-  /**
-   * Công khai: Lấy chi tiết cửa hàng theo shopId
-   */
-  @Get(':shopId')
-  getShopDetail(@Param('shopId') shopId: string) {
-    return this.shopsService.getShopDetail(shopId);
-  }
-
   @UseGuards(FirebaseAuthGuard)
   @Get('me/dashboard')
   getMyDashboard(@CurrentUser() currentUser: AuthenticatedUser) {
@@ -61,5 +53,13 @@ export class ShopsController {
   @Delete('me')
   deactivateMyShop(@CurrentUser() currentUser: AuthenticatedUser) {
     return this.shopsService.deactivateMine(currentUser);
+  }
+
+  /**
+   * Công khai: Lấy chi tiết cửa hàng theo shopId
+   */
+  @Get(':shopId')
+  getShopDetail(@Param('shopId') shopId: string) {
+    return this.shopsService.getShopDetail(shopId);
   }
 }

@@ -127,6 +127,7 @@ export class ProductsService {
         id: products.id,
         shopId: products.shopId,
         categoryId: products.categoryId,
+        shopOwnerId: shops.ownerId,
         name: products.name,
         description: products.description,
         origin: products.origin,

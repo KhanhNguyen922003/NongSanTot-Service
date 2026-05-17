@@ -3,10 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, eq, gte, lte, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import { db } from '@/core/database/db';
 import {
   addresses,
+  categories,
   conversations,
   messages,
   orders,
@@ -79,7 +80,7 @@ export class ShopsService {
 
   async getMine(currentUser: AuthenticatedUser) {
     const appUser = await this.authService.upsertAppUser(currentUser);
-
+    console.log(appUser);
     return db.query.shops.findFirst({
       where: eq(shops.ownerId, appUser.id),
     });
@@ -263,5 +264,94 @@ export class ShopsService {
    */
   async deactivateMine(currentUser: AuthenticatedUser) {
     return this.updateMine(currentUser, { isActive: false });
+  }
+
+  /**
+   * Lấy chi tiết cửa hàng công khai (không cần auth).
+   * Trả về: shop info + số đơn đã giao + số sản phẩm + danh sách sản phẩm của shop
+   */
+  async getShopDetail(shopId: string) {
+    const shop = await db.query.shops.findFirst({
+      where: and(eq(shops.id, shopId), eq(shops.isActive, true)),
+    });
+
+    if (!shop) {
+      throw new NotFoundException('Shop not found or is inactive');
+    }
+
+    // Số đơn đã giao thành công
+    const [deliveredOrderRow] = await db
+      .select({ cnt: sql<number>`count(*)::int` })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.shopId, shopId),
+          eq(orders.status, 'delivered'),
+        ),
+      );
+
+    // Số sản phẩm active
+    const [activeProductRow] = await db
+      .select({ cnt: sql<number>`count(*)::int` })
+      .from(products)
+      .where(
+        and(
+          eq(products.shopId, shopId),
+          eq(products.status, 'active'),
+          eq(products.isAvailable, true),
+        ),
+      );
+
+    // Danh sách sản phẩm của shop (limit 20)
+    const shopProducts = await db
+      .select({
+        id: products.id,
+        name: products.name,
+        price: products.price,
+        stock: products.stock,
+        coverImage: products.coverImage,
+        averageRating: products.averageRating,
+        reviewCount: products.reviewCount,
+        trustScore: products.trustScore,
+        verifiedBadge: products.verifiedBadge,
+        categoryId: products.categoryId,
+        categoryName: categories.name,
+      })
+      .from(products)
+      .leftJoin(categories, eq(products.categoryId, categories.id))
+      .where(
+        and(
+          eq(products.shopId, shopId),
+          eq(products.status, 'active'),
+          eq(products.isAvailable, true),
+        ),
+      )
+      .orderBy(desc(products.createdAt));
+
+    // Tính rating trung bình từ reviews
+    const [ratingRow] = await db
+      .select({
+        avgRating: sql<number>`coalesce(avg(${reviews.rating})::float, 0)`,
+      })
+      .from(reviews)
+      .innerJoin(products, eq(reviews.productId, products.id))
+      .where(eq(products.shopId, shopId));
+
+    return {
+      shop: {
+        id: shop.id,
+        name: shop.name,
+        description: shop.description,
+        logo: shop.logo,
+        displayAddress: shop.displayAddress,
+        rating: ratingRow?.avgRating ?? shop.rating ?? 0,
+        createdAt: shop.createdAt,
+      },
+      statistics: {
+        deliveredOrdersCount: Number(deliveredOrderRow?.cnt ?? 0),
+        activeProductsCount: Number(activeProductRow?.cnt ?? 0),
+      },
+      products: shopProducts,
+    };
   }
 }

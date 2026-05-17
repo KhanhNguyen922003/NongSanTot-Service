@@ -36,6 +36,13 @@
       "when": 1778500000000,
       "tag": "0004_conversation_read_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1778600000000,
+      "tag": "0005_ghtk_shipment_status",
+      "breakpoints": true
     }
   ]
 }

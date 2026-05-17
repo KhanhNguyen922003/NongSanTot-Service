@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import axios from 'axios';
 import { db } from '@/core/database/db';
 import {
@@ -213,12 +213,73 @@ export class OrdersService {
     };
   }
 
-  async getMyBuyOrders(currentUser: AuthenticatedUser) {
+  async getMyBuyOrders(
+    currentUser: AuthenticatedUser,
+    options?: { ghtkStatus?: string },
+  ) {
     const appUser = await this.authService.upsertAppUser(currentUser);
-    return db.query.orders.findMany({
-      where: eq(orders.buyerId, appUser.id),
-      orderBy: (table, { desc }) => [desc(table.createdAt)],
-    });
+    const raw = options?.ghtkStatus?.trim();
+
+    const whereParts = [eq(orders.buyerId, appUser.id)];
+    if (raw === 'none') {
+      whereParts.push(isNull(orders.ghtkShipmentStatus));
+    } else if (raw && raw !== 'all') {
+      const n = Number(raw);
+      if (Number.isFinite(n)) {
+        whereParts.push(eq(orders.ghtkShipmentStatus, n));
+      }
+    }
+
+    const rows = await db
+      .select({
+        id: orders.id,
+        buyerId: orders.buyerId,
+        shopId: orders.shopId,
+        shippingAddressSnapshot: orders.shippingAddressSnapshot,
+        actualPickAddressId: orders.actualPickAddressId,
+        totalPrice: orders.totalPrice,
+        shippingFee: orders.shippingFee,
+        finalPrice: orders.finalPrice,
+        status: orders.status,
+        shippingCode: orders.shippingCode,
+        note: orders.note,
+        negotiationOfferId: orders.negotiationOfferId,
+        createdAt: orders.createdAt,
+        ghtkShipmentStatus: orders.ghtkShipmentStatus,
+        shopName: shops.name,
+      })
+      .from(orders)
+      .innerJoin(shops, eq(orders.shopId, shops.id))
+      .where(and(...whereParts))
+      .orderBy(desc(orders.createdAt));
+
+    if (!rows.length) {
+      return rows.map((r) => ({ ...r, productNames: [] as string[] }));
+    }
+
+    const orderIds = rows.map((r) => r.id);
+    const itemRows = await db
+      .select({
+        orderId: orderItems.orderId,
+        productName: products.name,
+      })
+      .from(orderItems)
+      .leftJoin(products, eq(orderItems.productId, products.id))
+      .where(inArray(orderItems.orderId, orderIds));
+
+    const namesByOrder = new Map<string, string[]>();
+    for (const row of itemRows) {
+      const name = row.productName;
+      if (!name) continue;
+      const arr = namesByOrder.get(row.orderId) ?? [];
+      if (!arr.includes(name)) arr.push(name);
+      namesByOrder.set(row.orderId, arr);
+    }
+
+    return rows.map((r) => ({
+      ...r,
+      productNames: namesByOrder.get(r.id) ?? [],
+    }));
   }
 
   async getMySellOrders(currentUser: AuthenticatedUser) {
@@ -277,6 +338,158 @@ export class OrdersService {
       negotiationAwaitingBuyerAddress:
         order.status === 'awaiting_buyer_address' &&
         this.isNegotiationAddressPlaceholder(order.shippingAddressSnapshot),
+    };
+  }
+
+  /**
+   * Tra cứu trạng thái vận đơn GHTK (GET services/shipment/v2/{mã}).
+   * Buyer hoặc chủ shop của đơn được gọi; mã lấy từ shippingCode sau khi seller xác nhận.
+   */
+  async getGhtkShipmentTracking(currentUser: AuthenticatedUser, orderId: string) {
+    const appUser = await this.authService.upsertAppUser(currentUser);
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const shop = await db.query.shops.findFirst({
+      where: eq(shops.id, order.shopId),
+    });
+    const canRead =
+      order.buyerId === appUser.id || (shop && shop.ownerId === appUser.id);
+    if (!canRead) {
+      throw new ForbiddenException('Bạn không có quyền truy cập đơn hàng này');
+    }
+
+    const code = order.shippingCode?.trim();
+    if (!code) {
+      throw new BadRequestException('Đơn chưa có mã vận đơn để tra cứu GHTK');
+    }
+
+    const apiToken = process.env.GHTK_API_TOKEN;
+    const apiUrl = process.env.GHTK_API_URL || 'https://services.giaohangtietkiem.vn';
+
+    if (!apiToken || code.startsWith('MOCK-')) {
+      return {
+        success: true,
+        isMock: true,
+        message: code.startsWith('MOCK-')
+          ? 'Đơn demo (MOCK): không có dữ liệu trên hệ thống GHTK thật.'
+          : 'Chưa cấu hình GHTK_API_TOKEN — hiển thị dữ liệu mô phỏng.',
+        order: this.buildMockGhtkTrackingPayload(order.id, code),
+      };
+    }
+
+    try {
+      const response = await axios.get(
+        `${apiUrl}/services/shipment/v2/${encodeURIComponent(code)}`,
+        {
+          headers: { Token: apiToken },
+        },
+      );
+
+      const body = response.data as {
+        success?: boolean;
+        message?: string;
+        order?: Record<string, unknown>;
+      };
+
+      if (!body?.success || !body.order) {
+        throw new BadRequestException(
+          typeof body?.message === 'string' && body.message
+            ? body.message
+            : 'GHTK không trả dữ liệu đơn vận chuyển',
+        );
+      }
+
+      const normalized = this.normalizeGhtkShipmentOrder(body.order);
+      const ghtkSt = this.parseGhtkShipmentStatus(normalized.status);
+      if (ghtkSt !== null) {
+        await db
+          .update(orders)
+          .set({ ghtkShipmentStatus: ghtkSt })
+          .where(eq(orders.id, orderId));
+      }
+
+      return {
+        success: true,
+        isMock: false,
+        message: typeof body.message === 'string' ? body.message : '',
+        order: normalized,
+      };
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const data = err.response?.data as { message?: string } | undefined;
+        const msg =
+          data?.message ||
+          err.message ||
+          'Không tra cứu được vận đơn GHTK';
+        throw new BadRequestException(msg);
+      }
+      throw err;
+    }
+  }
+
+  private buildMockGhtkTrackingPayload(partnerId: string, labelId: string) {
+    return {
+      labelId,
+      partnerId,
+      status: '-1',
+      statusText: 'Demo / mô phỏng',
+      created: null as string | null,
+      modified: null as string | null,
+      message: null as string | null,
+      pickDate: null as string | null,
+      deliverDate: null as string | null,
+      shipMoney: null as string | null,
+      insurance: null as string | null,
+      value: null as string | null,
+      weight: null as string | null,
+      pickMoney: null as number | null,
+      isFreeship: null as string | null,
+      customerFullname: null as string | null,
+      customerTel: null as string | null,
+      address: null as string | null,
+      storageDay: null as string | null,
+    };
+  }
+
+  private parseGhtkShipmentStatus(value: unknown): number | null {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  private normalizeGhtkShipmentOrder(o: Record<string, unknown>) {
+    const str = (v: unknown) => (v == null ? null : String(v));
+    const num = (v: unknown) => {
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    return {
+      labelId: str(o.label_id),
+      partnerId: str(o.partner_id),
+      status: str(o.status),
+      statusText: str(o.status_text),
+      created: str(o.created),
+      modified: str(o.modified),
+      message: str(o.message),
+      pickDate: str(o.pick_date),
+      deliverDate: str(o.deliver_date),
+      shipMoney: str(o.ship_money),
+      insurance: str(o.insurance),
+      value: str(o.value),
+      weight: str(o.weight),
+      pickMoney: num(o.pick_money),
+      isFreeship: str(o.is_freeship),
+      customerFullname: str(o.customer_fullname),
+      customerTel: str(o.customer_tel),
+      address: str(o.address),
+      storageDay: str(o.storage_day),
     };
   }
 
@@ -346,6 +559,7 @@ export class OrdersService {
         shippingFee: quote.fee,
         finalPrice: order.totalPrice + quote.fee,
         shippingCode: ghtkOrder.trackingCode,
+        ghtkShipmentStatus: ghtkOrder.ghtkStatus,
         note: ghtkOrder.message ? `${order.note || ''}\n${ghtkOrder.message}`.trim() : order.note,
       })
       .where(eq(orders.id, orderId))
@@ -700,6 +914,7 @@ export class OrdersService {
         success: true,
         trackingCode: `MOCK-${Date.now()}`,
         message: 'Mock GHTK: chưa cấu hình GHTK_API_TOKEN.',
+        ghtkStatus: null as number | null,
       };
     }
 
@@ -765,10 +980,14 @@ export class OrdersService {
       throw new BadRequestException('Tạo đơn GHTK thất bại: thiếu tracking id');
     }
 
+    const createdOrder = response.data?.order as Record<string, unknown> | undefined;
+    const parsed = this.parseGhtkShipmentStatus(createdOrder?.status);
+
     return {
       success: true,
       trackingCode,
       message: response.data?.message as string | undefined,
+      ghtkStatus: parsed ?? 1,
     };
   }
 

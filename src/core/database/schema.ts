@@ -174,6 +174,8 @@ export const orders = pgTable('orders', {
   
   status: orderStatusEnum('status').default('pending'),
   shippingCode: varchar('shipping_code'), // Tracking code từ GHTK
+  /** Mã trạng thái vận đơn GHTK (services/shipment/v2), ví dụ 6 = đã giao. */
+  ghtkShipmentStatus: integer('ghtk_shipment_status'),
   note: text('note'),
   /** Liên kết đơn tạo sau khi đồng ý trả giá (snapshot địa chỉ ban đầu là placeholder JSON). */
   negotiationOfferId: uuid('negotiation_offer_id'),

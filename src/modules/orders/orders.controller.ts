@@ -43,8 +43,11 @@ export class OrdersController {
   }
 
   @Get('me/buy')
-  getMyBuyOrders(@CurrentUser() currentUser: AuthenticatedUser) {
-    return this.ordersService.getMyBuyOrders(currentUser);
+  getMyBuyOrders(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query('ghtkStatus') ghtkStatus?: string,
+  ) {
+    return this.ordersService.getMyBuyOrders(currentUser, { ghtkStatus });
   }
 
   @Get('me/sell')
@@ -59,6 +62,14 @@ export class OrdersController {
     @Body() body: BuyerConfirmNegotiationOrderDto,
   ) {
     return this.ordersService.buyerConfirmNegotiationOrder(currentUser, id, body);
+  }
+
+  @Get(':id/shipment/tracking')
+  getGhtkShipmentTracking(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.ordersService.getGhtkShipmentTracking(currentUser, id);
   }
 
   @Get(':id')

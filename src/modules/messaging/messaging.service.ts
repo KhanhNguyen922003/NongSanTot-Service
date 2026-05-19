@@ -36,8 +36,8 @@ export class MessagingService {
     private readonly chatActivity: ChatActivityBus,
   ) {}
 
-  private notifyChatActivity(conversationId: string) {
-    this.chatActivity.notify(conversationId);
+  private notifyChatActivity(conversationId: string, payload?: unknown) {
+    this.chatActivity.notify(conversationId, payload);
   }
 
   /** SSE: client giữ kết nối, server đẩy khi có tin / đề xuất / đơn trong hội thoại. */
@@ -312,7 +312,7 @@ export class MessagingService {
       .set({ isRead: true })
       .where(and(eq(messages.conversationId, conversationId), ne(messages.senderId, appUser.id)));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'read', readAt });
   }
 
   async getConversationDetail(currentUser: AuthenticatedUser, conversationId: string) {
@@ -367,7 +367,7 @@ export class MessagingService {
     return {
       conversation: conv,
       role,
-      shop: { id: shop.id, name: shop.name, ownerId: shop.ownerId },
+      shop: { id: shop.id, name: shop.name, ownerId: shop.ownerId, logo: shop.logo ?? null },
       product,
       buyer: buyerUser
         ? { id: buyerUser.id, fullName: buyerUser.fullName, phone: buyerUser.phone }
@@ -443,7 +443,7 @@ export class MessagingService {
       })
       .where(eq(conversations.id, conversationId));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'message', message: msg });
     return msg;
   }
 
@@ -514,7 +514,7 @@ export class MessagingService {
       .set({ lastMessage: summary, updatedAt: new Date() })
       .where(eq(conversations.id, conversationId));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'offer', offer, message: msg });
 
     return { offer, message: msg };
   }
@@ -564,7 +564,7 @@ export class MessagingService {
       .set({ lastMessage: note, updatedAt: new Date() })
       .where(eq(conversations.id, conversationId));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'offer:accepted', offer: updated, message: msg });
 
     return { offer: updated, message: msg };
   }
@@ -614,7 +614,7 @@ export class MessagingService {
       .set({ lastMessage: note, updatedAt: new Date() })
       .where(eq(conversations.id, conversationId));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'offer:declined', offer: updated, message: msg });
 
     return { offer: updated, message: msg };
   }
@@ -673,7 +673,7 @@ export class MessagingService {
       .set({ lastMessage: noteTxt, updatedAt: new Date() })
       .where(eq(conversations.id, conversationId));
 
-    this.notifyChatActivity(conversationId);
+    this.notifyChatActivity(conversationId, { type: 'order:created', order, message: msg });
 
     return { order, message: msg };
   }

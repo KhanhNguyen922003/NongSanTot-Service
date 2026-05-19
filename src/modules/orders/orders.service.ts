@@ -289,10 +289,41 @@ export class OrdersService {
     });
     if (!shop) return [];
 
-    return db.query.orders.findMany({
+    const rawOrders = await db.query.orders.findMany({
       where: eq(orders.shopId, shop.id),
       orderBy: (table, { desc }) => [desc(table.createdAt)],
     });
+
+    if (!rawOrders.length) return [];
+
+    const orderIds = rawOrders.map((r) => r.id);
+    const itemRows = await db
+      .select({
+        id: orderItems.id,
+        orderId: orderItems.orderId,
+        productId: orderItems.productId,
+        quantity: orderItems.quantity,
+        priceAtPurchase: orderItems.priceAtPurchase,
+        productName: products.name,
+        productCoverImage: products.coverImage,
+      })
+      .from(orderItems)
+      .leftJoin(products, eq(orderItems.productId, products.id))
+      .where(inArray(orderItems.orderId, orderIds));
+
+    const itemsByOrder = new Map<string, typeof itemRows>();
+    for (const row of itemRows) {
+      const arr = itemsByOrder.get(row.orderId) ?? [];
+      arr.push(row);
+      itemsByOrder.set(row.orderId, arr);
+    }
+
+    return rawOrders.map((r) => ({
+      ...r,
+      items: itemsByOrder.get(r.id) ?? [],
+      shippingAddressSnapshot: this.safeParseSnapshot(r.shippingAddressSnapshot),
+      shop,
+    }));
   }
 
   async getOrderDetail(currentUser: AuthenticatedUser, orderId: string) {

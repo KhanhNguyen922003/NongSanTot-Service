@@ -3,6 +3,11 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { db } from '@/core/database/db';
 import { products, productGrowthDiary, shops, users } from '@/core/database/schema';
 import type { ApproveProductDto, RejectProductDto } from './dto/review-product.dto';
+import type { UpdateShopStatusDto } from './dto/update-shop-status.dto';
+
+type UpdateUserRoleDto = {
+  role: 'buyer' | 'seller';
+};
 
 @Injectable()
 export class AdminService {
@@ -21,17 +26,145 @@ export class AdminService {
       .from(products)
       .where(eq(products.status, 'pending_review'));
 
+    const [activeShopCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(shops)
+      .where(eq(shops.isActive, true));
+
+    const [inactiveShopCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(shops)
+      .where(eq(shops.isActive, false));
+
+    const [buyerCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.role, 'buyer'));
+
+    const [sellerCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.role, 'seller'));
+
+    const [adminCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.role, 'admin'));
+
     const recentPendingProducts = await this.getProductsForReview('pending_review', 5);
 
     return {
       totals: {
         users: userCount.count,
         shops: shopCount.count,
+        activeShops: activeShopCount.count,
+        inactiveShops: inactiveShopCount.count,
+        buyers: buyerCount.count,
+        sellers: sellerCount.count,
+        admins: adminCount.count,
         products: productCount.count,
         pendingProducts: pendingProductCount.count,
       },
       recentPendingProducts,
     };
+  }
+
+  async getUsers(role = 'all', limit = 200) {
+    const whereClause =
+      role === 'buyer'
+        ? eq(users.role, 'buyer')
+        : role === 'seller'
+          ? eq(users.role, 'seller')
+          : role === 'admin'
+            ? eq(users.role, 'admin')
+            : undefined;
+
+    return db
+      .select({
+        id: users.id,
+        firebaseUid: users.firebaseUid,
+        phone: users.phone,
+        fullName: users.fullName,
+        avatar: users.avatar,
+        role: users.role,
+        createdAt: users.createdAt,
+        shopCount: sql<number>`count(${shops.id})::int`,
+        productCount: sql<number>`count(${products.id})::int`,
+      })
+      .from(users)
+      .leftJoin(shops, eq(shops.ownerId, users.id))
+      .leftJoin(products, eq(products.shopId, shops.id))
+      .where(whereClause)
+      .groupBy(users.id)
+      .orderBy(desc(users.createdAt))
+      .limit(limit);
+  }
+
+  async updateUserRole(userId: string, payload: UpdateUserRoleDto) {
+    const [updated] = await db
+      .update(users)
+      .set({
+        role: payload.role,
+      })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!updated) {
+      throw new NotFoundException('User not found');
+    }
+
+    return updated;
+  }
+
+  async getShops(status = 'all', limit = 100) {
+    const whereClause =
+      status === 'active'
+        ? eq(shops.isActive, true)
+        : status === 'inactive'
+          ? eq(shops.isActive, false)
+          : undefined;
+
+    return db
+      .select({
+        id: shops.id,
+        name: shops.name,
+        description: shops.description,
+        displayAddress: shops.displayAddress,
+        logo: shops.logo,
+        isActive: shops.isActive,
+        rating: shops.rating,
+        createdAt: shops.createdAt,
+        updatedAt: shops.updatedAt,
+        ownerId: users.id,
+        ownerName: users.fullName,
+        ownerPhone: users.phone,
+        productCount: sql<number>`count(${products.id})::int`,
+        activeProductCount: sql<number>`sum(case when ${products.status} = 'active' then 1 else 0 end)::int`,
+      })
+      .from(shops)
+      .leftJoin(users, eq(shops.ownerId, users.id))
+      .leftJoin(products, eq(products.shopId, shops.id))
+      .where(whereClause)
+      .groupBy(shops.id, users.id)
+      .orderBy(desc(shops.createdAt))
+      .limit(limit);
+  }
+
+  async updateShopStatus(shopId: string, payload: UpdateShopStatusDto) {
+    const [updated] = await db
+      .update(shops)
+      .set({
+        isActive: payload.isActive,
+        updatedAt: new Date(),
+      })
+      .where(eq(shops.id, shopId))
+      .returning();
+
+    if (!updated) {
+      throw new NotFoundException('Shop not found');
+    }
+
+    return updated;
   }
 
   async getProductsForReview(status = 'pending_review', limit = 50) {

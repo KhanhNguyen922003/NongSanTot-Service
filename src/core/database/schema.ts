@@ -62,6 +62,7 @@ export const addresses = pgTable('addresses', {
   
   isDefault: boolean('is_default').default(false),
   createdAt: timestamp('created_at').defaultNow(),
+  updateAt: timestamp('updated_at').defaultNow(),
 });
 
 // --- 2. CỬA HÀNG (Shop Module) ---
@@ -173,6 +174,8 @@ export const orders = pgTable('orders', {
   finalPrice: doublePrecision('final_price').notNull(),
   
   status: orderStatusEnum('status').default('pending'),
+  // Khi true nghĩa là hệ thống đã trừ tồn kho cho đơn này
+  isStockReserved: boolean('is_stock_reserved').default(false),
   shippingCode: varchar('shipping_code'), // Tracking code từ GHTK
   /** Mã trạng thái vận đơn GHTK (services/shipment/v2), ví dụ 6 = đã giao. */
   ghtkShipmentStatus: integer('ghtk_shipment_status'),

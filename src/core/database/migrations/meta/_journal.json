@@ -43,6 +43,13 @@
       "when": 1778600000000,
       "tag": "0005_ghtk_shipment_status",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780220065401,
+      "tag": "0006_heavy_lyja",
+      "breakpoints": true
     }
   ]
 }

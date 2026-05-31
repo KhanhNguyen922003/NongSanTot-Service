@@ -134,93 +134,74 @@ export class OrdersService {
     }
 
     const groupedByShop = this.groupCartItemsByShop(items);
-    const createdOrders = await Promise.all(
-      groupedByShop.map(async (group) => {
-        const result = await db.transaction(async (tx) => {
-          const pickAddress = await this.ensureShopPickAddress(group.shopId);
-          const quote = await this.quoteShippingFee({
-            pickAddress: pickAddress.detail,
-            pickProvince: pickAddress.province,
-            pickDistrict: this.resolveDistrictLikeField(
-              pickAddress.detail,
-              pickAddress.ward,
-              pickAddress.province,
-            ),
-            pickWard: pickAddress.ward,
-            address: buyerAddress.detail,
-            province: buyerAddress.province,
-            district: this.resolveDistrictLikeField(
-              buyerAddress.detail,
-              buyerAddress.ward,
-              buyerAddress.province,
-            ),
-            ward: buyerAddress.ward,
-            weight: this.calculateGroupWeightGram(group.items),
-            fastShipping: payload.fastShipping ?? false,
-          });
+    const createdOrders: Array<typeof orders.$inferSelect> = [];
 
-          const itemsTotal = group.items.reduce(
-            (sum, item) => sum + item.productPrice * item.quantity,
-            0,
-          );
-          const shippingFee = quote.fee;
-          const finalPrice = itemsTotal + shippingFee;
-          const snapshot: ShippingAddressSnapshot = {
-            addressId: buyerAddress.id,
-            receiverName: buyerAddress.receiverName,
-            receiverPhone: buyerAddress.receiverPhone,
-            province: buyerAddress.province,
-            ward: buyerAddress.ward,
-            detail: buyerAddress.detail,
-          };
-
-          const createdOrderRes = (await tx
-            .insert(orders)
-            .values({
-              buyerId: appUser.id,
-              shopId: group.shopId,
-              shippingAddressSnapshot: JSON.stringify(snapshot),
-              actualPickAddressId: pickAddress.id,
-              totalPrice: itemsTotal,
-              shippingFee,
-              finalPrice,
-              status: 'pending',
-              isStockReserved: true,
-              note: payload.note,
-              createdAt: new Date(),
-            })
-            .returning()) as any;
-          const createdOrder = Array.isArray(createdOrderRes) ? createdOrderRes[0] : createdOrderRes;
-
-          // insert order items
-          await tx.insert(orderItems).values(
-            group.items.map((item) => ({
-              orderId: createdOrder.id,
-              productId: item.productId,
-              quantity: item.quantity,
-              priceAtPurchase: item.productPrice,
-            })),
-          );
-
-          // reserve stock for each item (conditional update)
-          for (const item of group.items) {
-            const updatedRes = (await tx
-              .update(products)
-              .set({ stock: sql<number>`coalesce(${products.stock}, 0) - ${item.quantity}` })
-              .where(and(eq(products.id, item.productId), gte(products.stock, item.quantity)))
-              .returning()) as any;
-            const updated = Array.isArray(updatedRes) ? updatedRes[0] : updatedRes;
-            if (!updated) {
-              throw new BadRequestException(`Sản phẩm ${item.productName} không đủ tồn kho`);
-            }
-          }
-
-          return createdOrder;
+    try {
+      for (const group of groupedByShop) {
+        const pickAddress = await this.ensureShopPickAddress(group.shopId);
+        const quote = await this.quoteShippingFee({
+          pickAddress: pickAddress.detail,
+          pickProvince: pickAddress.province,
+          pickDistrict: this.resolveDistrictLikeField(
+            pickAddress.detail,
+            pickAddress.ward,
+            pickAddress.province,
+          ),
+          pickWard: pickAddress.ward,
+          address: buyerAddress.detail,
+          province: buyerAddress.province,
+          district: this.resolveDistrictLikeField(
+            buyerAddress.detail,
+            buyerAddress.ward,
+            buyerAddress.province,
+          ),
+          ward: buyerAddress.ward,
+          weight: this.calculateGroupWeightGram(group.items),
+          fastShipping: payload.fastShipping ?? false,
         });
 
-        return result;
-      }),
-    );
+        const itemsTotal = group.items.reduce(
+          (sum, item) => sum + item.productPrice * item.quantity,
+          0,
+        );
+        const shippingFee = quote.fee;
+        const finalPrice = itemsTotal + shippingFee;
+        const snapshot: ShippingAddressSnapshot = {
+          addressId: buyerAddress.id,
+          receiverName: buyerAddress.receiverName,
+          receiverPhone: buyerAddress.receiverPhone,
+          province: buyerAddress.province,
+          ward: buyerAddress.ward,
+          detail: buyerAddress.detail,
+        };
+
+        const createdOrder = await this.insertOrderAndReserveStock(
+          {
+            buyerId: appUser.id,
+            shopId: group.shopId,
+            shippingAddressSnapshot: JSON.stringify(snapshot),
+            actualPickAddressId: pickAddress.id,
+            totalPrice: itemsTotal,
+            shippingFee,
+            finalPrice,
+            status: 'pending',
+            isStockReserved: true,
+            note: payload.note,
+            createdAt: new Date(),
+          },
+          group.items.map((item) => ({
+            productId: item.productId,
+            quantity: item.quantity,
+            priceAtPurchase: item.productPrice,
+          })),
+        );
+
+        createdOrders.push(createdOrder);
+      }
+    } catch (error) {
+      await this.rollbackCreatedOrders(createdOrders);
+      throw error;
+    }
 
     await Promise.all(
       items.map((item) => db.delete(cartItems).where(eq(cartItems.id, item.id))),
@@ -642,28 +623,20 @@ export class OrdersService {
       throw new BadRequestException('Đơn đã hoàn tất hoặc đã hủy');
     }
 
-    // If stock was reserved for this order, restore it atomically
+    // If stock was reserved for this order, restore it before marking cancelled.
     if (order.isStockReserved) {
       const items = await db
         .select({ productId: orderItems.productId, quantity: orderItems.quantity })
         .from(orderItems)
         .where(eq(orderItems.orderId, order.id));
 
-      const updated = await db.transaction(async (tx) => {
-        for (const it of items) {
-          await tx
-            .update(products)
-            .set({ stock: sql<number>`coalesce(${products.stock}, 0) + ${it.quantity}` })
-            .where(eq(products.id, it.productId));
-        }
-        const uRes = (await tx
-          .update(orders)
-          .set({ status: 'cancelled', isStockReserved: false })
-          .where(eq(orders.id, orderId))
-          .returning()) as any;
-        const u = Array.isArray(uRes) ? uRes[0] : uRes;
-        return u;
-      });
+      await this.restoreReservedStock(items);
+
+      const [updated] = await db
+        .update(orders)
+        .set({ status: 'cancelled', isStockReserved: false })
+        .where(eq(orders.id, orderId))
+        .returning();
 
       return updated;
     }
@@ -719,49 +692,29 @@ export class OrdersService {
       negotiationPendingAddress: true,
     } satisfies NegotiationAddressPlaceholder);
 
-    // Create order + reserve stock in a transaction
-    const createdOrder = await db.transaction(async (tx) => {
-      const orderRowRes = (await tx
-        .insert(orders)
-        .values({
-          buyerId: params.buyerId,
-          shopId: params.shopId,
-          shippingAddressSnapshot: placeholder,
-          actualPickAddressId: pickAddress.id,
-          totalPrice: itemsTotal,
-          shippingFee: 0,
-          finalPrice: itemsTotal,
-          status: 'awaiting_buyer_address',
-          isStockReserved: true,
-          note: params.note,
-          negotiationOfferId: params.offer.id,
-          createdAt: new Date(),
-        })
-        .returning()) as any;
-      const orderRow = Array.isArray(orderRowRes) ? orderRowRes[0] : orderRowRes;
-
-      await tx.insert(orderItems).values({
-        orderId: orderRow.id,
-        productId: params.offer.productId,
-        quantity: params.offer.quantity,
-        priceAtPurchase: params.offer.unitPrice,
-      });
-
-      // reserve stock
-      const updatedRes = (await tx
-        .update(products)
-        .set({ stock: sql<number>`coalesce(${products.stock}, 0) - ${params.offer.quantity}` })
-        .where(and(eq(products.id, params.offer.productId), gte(products.stock, params.offer.quantity)))
-        .returning()) as any;
-      const updated = Array.isArray(updatedRes) ? updatedRes[0] : updatedRes;
-      if (!updated) {
-        throw new BadRequestException('Số lượng vượt tồn kho');
-      }
-
-      return orderRow;
-    });
-
-    return createdOrder;
+    return this.insertOrderAndReserveStock(
+      {
+        buyerId: params.buyerId,
+        shopId: params.shopId,
+        shippingAddressSnapshot: placeholder,
+        actualPickAddressId: pickAddress.id,
+        totalPrice: itemsTotal,
+        shippingFee: 0,
+        finalPrice: itemsTotal,
+        status: 'awaiting_buyer_address',
+        isStockReserved: true,
+        note: params.note,
+        negotiationOfferId: params.offer.id,
+        createdAt: new Date(),
+      },
+      [
+        {
+          productId: params.offer.productId,
+          quantity: params.offer.quantity,
+          priceAtPurchase: params.offer.unitPrice,
+        },
+      ],
+    );
   }
 
   async buyerConfirmNegotiationOrder(
@@ -1170,5 +1123,74 @@ export class OrdersService {
   private estimateProductWeightKg(unit: string | null, quantity: number) {
     const gram = this.estimateItemWeightGram(unit, quantity);
     return Number((gram / 1000).toFixed(3));
+  }
+
+  private async insertOrderAndReserveStock(
+    orderData: typeof orders.$inferInsert,
+    items: Array<{ productId: string; quantity: number; priceAtPurchase: number }>,
+  ) {
+    const createdOrderRes = await db.insert(orders).values(orderData).returning();
+    const createdOrder = Array.isArray(createdOrderRes) ? createdOrderRes[0] : createdOrderRes;
+    if (!createdOrder) {
+      throw new BadRequestException('Không thể tạo đơn hàng');
+    }
+
+    const reservedItems: Array<{ productId: string; quantity: number }> = [];
+
+    try {
+      await db.insert(orderItems).values(
+        items.map((item) => ({
+          orderId: createdOrder.id,
+          productId: item.productId,
+          quantity: item.quantity,
+          priceAtPurchase: item.priceAtPurchase,
+        })),
+      );
+
+      for (const item of items) {
+        const updatedRes = await db
+          .update(products)
+          .set({ stock: sql<number>`coalesce(${products.stock}, 0) - ${item.quantity}` })
+          .where(and(eq(products.id, item.productId), gte(products.stock, item.quantity)))
+          .returning();
+        const updated = Array.isArray(updatedRes) ? updatedRes[0] : updatedRes;
+        if (!updated) {
+          throw new BadRequestException('Số lượng vượt tồn kho');
+        }
+        reservedItems.push({ productId: item.productId, quantity: item.quantity });
+      }
+
+      return createdOrder;
+    } catch (error) {
+      await this.restoreReservedStock(reservedItems).catch(() => undefined);
+      await db.delete(orderItems).where(eq(orderItems.orderId, createdOrder.id)).catch(() => undefined);
+      await db.delete(orders).where(eq(orders.id, createdOrder.id)).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async restoreReservedStock(items: Array<{ productId: string; quantity: number }>) {
+    for (const item of items) {
+      await db
+        .update(products)
+        .set({ stock: sql<number>`coalesce(${products.stock}, 0) + ${item.quantity}` })
+        .where(eq(products.id, item.productId));
+    }
+  }
+
+  private async rollbackCreatedOrders(ordersToRollback: Array<typeof orders.$inferSelect>) {
+    for (const order of [...ordersToRollback].reverse()) {
+      const items = await db
+        .select({ productId: orderItems.productId, quantity: orderItems.quantity })
+        .from(orderItems)
+        .where(eq(orderItems.orderId, order.id));
+
+      if (items.length) {
+        await this.restoreReservedStock(items);
+      }
+
+      await db.delete(orderItems).where(eq(orderItems.orderId, order.id));
+      await db.delete(orders).where(eq(orders.id, order.id));
+    }
   }
 }

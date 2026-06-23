@@ -11,6 +11,7 @@ import { CartsModule } from './modules/carts/carts.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { MessagingModule } from './modules/messaging/messaging.module';
     OrdersModule,
     CategoriesModule,
     MessagingModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -193,7 +193,6 @@ export const orderItems = pgTable('order_items', {
   priceAtPurchase: doublePrecision('price_at_purchase').notNull(),
 });
 
-// --- 5. TƯƠNG TÁC & THÔNG BÁO (Interaction & Chat) ---
 export const reviews = pgTable('reviews', {
   id: uuid('id').defaultRandom().primaryKey(),
   productId: uuid('product_id').references(() => products.id).notNull(),
@@ -205,6 +204,7 @@ export const reviews = pgTable('reviews', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
+// --- 5. TƯƠNG TÁC & THÔNG BÁO (Interaction & Chat) ---
 export const conversations = pgTable('conversations', {
   id: uuid('id').defaultRandom().primaryKey(),
   /** Buyer (always the marketplace user initiating thread from product). */

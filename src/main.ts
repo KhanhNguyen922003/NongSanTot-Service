@@ -6,6 +6,12 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://192.168.2.7:5173')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const host = process.env.HOST || '0.0.0.0';
+  const port = Number(process.env.PORT ?? 3000);
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -13,7 +19,10 @@ async function bootstrap() {
       transform: true,
     }),
   );
-  app.enableCors();
+  app.enableCors({
+    origin: corsOrigins,
+    credentials: true,
+  });
   const swaggerConfig = new DocumentBuilder()
     .setTitle('NongSanTot API')
     .setDescription('API docs for NongSanTot backend')
@@ -28,9 +37,8 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
-  const port = process.env.PORT ?? 3000;
-  await app.listen(port);
-  console.log('Link to Server: http://localhost:' + port);
-  console.log('Swagger Docs: http://localhost:' + port + '/docs');
+  await app.listen(port, host);
+  console.log('Link to Server: http://' + host + ':' + port);
+  console.log('Swagger Docs: http://' + host + ':' + port + '/docs');
 }
 bootstrap();

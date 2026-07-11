@@ -37,10 +37,7 @@ export class ProductsService {
       const keyword = `%${filters.q.trim()}%`;
       conditions.push(
         sql`(
-          ${products.name} ILIKE ${keyword} OR
-          ${products.description} ILIKE ${keyword} OR
-          ${products.origin} ILIKE ${keyword} OR
-          ${shops.name} ILIKE ${keyword}
+          ${products.name} ILIKE ${keyword}
         )`,
       );
     }

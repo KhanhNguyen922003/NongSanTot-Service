@@ -1020,7 +1020,21 @@ export class OrdersService {
         'Content-Type': 'application/json',
       },
     });
-
+    console.log("response.data", response.data);
+//     response.data {
+//   success: false,
+//   message: 'Địa chỉ lấy hàng: quận/ huyện Thôn 4 không hợp lệ. Shop vui lòng kiểm tra và cập nhật lại thông tin',
+//   error_code: '30213',
+//   log_id: '166a53c4950405f'
+// }
+    if (!response.data?.success) {
+      throw new BadRequestException(
+        typeof response.data?.message === 'string' && response.data.message
+          ? response.data.message
+          : 'GHTK không tạo được đơn vận chuyển',
+      );
+    }
+    
     const trackingCode =
       String(response.data?.order?.tracking_id ?? response.data?.order?.label ?? '');
 

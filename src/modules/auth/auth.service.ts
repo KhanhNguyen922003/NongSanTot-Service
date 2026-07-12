@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { db } from '@/core/database/db';
 import { users } from '@/core/database/schema';
@@ -6,8 +6,35 @@ import type { AuthenticatedUser } from './interfaces/authenticated-user.interfac
 
 @Injectable()
 export class AuthService {
+  private normalizePhone(phone: string) {
+    const cleaned = phone.replace(/\s+/g, '').trim();
+
+    if (!cleaned) {
+      throw new BadRequestException('Phone is required');
+    }
+
+    if (cleaned.startsWith('+')) return cleaned;
+    if (cleaned.startsWith('0')) return `+84${cleaned.slice(1)}`;
+    if (cleaned.startsWith('84')) return `+${cleaned}`;
+
+    throw new BadRequestException('Invalid phone number');
+  }
+
   private buildFallbackName(user: AuthenticatedUser): string {
     return user.name?.trim() || user.phoneNumber || `User ${user.uid.slice(0, 8)}`;
+  }
+
+  async isPhoneRegistered(phone: string) {
+    const normalizedPhone = this.normalizePhone(phone);
+
+    const existingUser = await db.query.users.findFirst({
+      where: eq(users.phone, normalizedPhone),
+    });
+
+    return {
+      exists: !!existingUser,
+      phone: normalizedPhone,
+    };
   }
 
   async upsertAppUser(currentUser: AuthenticatedUser) {
